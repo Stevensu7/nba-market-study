@@ -619,8 +619,9 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
         status = _clean_text(row.get("状态"))
         warning = _clean_text(row.get("价差预警"))
         tag_class = "win" if result == "win" else "loss" if result == "loss" else "muted"
+        row_class = "warning-row" if warning == "YES" else ""
         fragments.append(
-            f"<tr data-platform='{platform}' data-settled='{str(bool(actual)).lower()}'>"
+            f"<tr class='{row_class}' data-platform='{platform}' data-settled='{str(bool(actual)).lower()}'>"
             f"<td>{platform}</td>"
             f"<td>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</td>"
             f"<td>{_clean_text(row.get('主队'))}</td>"
@@ -641,6 +642,7 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
 def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     summary = _summary_metrics(df)
     rows_json = df.fillna("").to_dict(orient="records")
+    updated_bjt = to_beijing_label(utc_now())
     platforms = sorted({row.get("平台", "") for row in rows_json if row.get("平台", "")})
     platform_buttons = "".join(
         f"<button class='filter-btn' data-platform='{platform}'>{platform}</button>" for platform in platforms
@@ -650,7 +652,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     chart_html = _build_equity_svg(df)
     warning_rows = [row for row in rows_json if _clean_text(row.get("价差预警")) == "YES"]
     warning_html = "".join(
-        f"<div class='warning-item'><div><strong>{_clean_text(row.get('主队'))} vs {_clean_text(row.get('客队'))}</strong></div><div class='muted'>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</div><div>Home gap: {_clean_text(row.get('跨市场主队价差'))} | Away gap: {_clean_text(row.get('跨市场客队价差'))}</div></div>"
+        f"<div class='warning-item'><div class='warning-kicker'>ALERT</div><div><strong>{_clean_text(row.get('主队'))} vs {_clean_text(row.get('客队'))}</strong></div><div class='muted'>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</div><div>Home gap: {_clean_text(row.get('跨市场主队价差'))} | Away gap: {_clean_text(row.get('跨市场客队价差'))}</div></div>"
         for row in warning_rows
     ) or "<div class='muted'>No divergence warnings above 0.05 right now.</div>"
     html = f"""<!doctype html>
@@ -668,6 +670,8 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     .hero:before {{ content:''; position:absolute; inset:auto -60px -80px auto; width:220px; height:220px; background:radial-gradient(circle, rgba(182,90,42,.22), rgba(182,90,42,0)); border-radius:50%; }}
     .hero h1 {{ margin:0 0 10px; font-size:38px; letter-spacing:.2px; color:var(--ink); }}
     .hero p {{ margin:0; color:var(--muted); max-width:760px; line-height:1.6; font-family:'Segoe UI', Arial, sans-serif; }}
+    .hero-meta {{ margin-top:16px; display:flex; gap:12px; flex-wrap:wrap; font-family:'Segoe UI', Arial, sans-serif; }}
+    .hero-pill {{ display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:rgba(255,255,255,.76); border:1px solid rgba(182,90,42,.18); color:var(--ink); font-size:13px; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin:24px 0; }}
     .card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
     .label {{ color:var(--muted); font-size:13px; margin-bottom:8px; font-family:'Segoe UI', Arial, sans-serif; }}
@@ -675,8 +679,9 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     .value.good {{ color:var(--good); }}
     .value.bad {{ color:var(--bad); }}
     .split {{ display:grid; grid-template-columns:1.35fr .65fr; gap:18px; margin-bottom:18px; }}
-    .warning-item {{ padding:12px 0; border-bottom:1px dashed var(--line); font-family:'Segoe UI', Arial, sans-serif; }}
+    .warning-item {{ padding:14px 14px 14px 16px; border:1px solid rgba(204,61,47,.18); border-left:5px solid var(--bad); border-radius:16px; background:linear-gradient(180deg, rgba(255,244,242,.98), rgba(255,250,248,.98)); margin-bottom:12px; font-family:'Segoe UI', Arial, sans-serif; }}
     .warning-item:last-child {{ border-bottom:none; }}
+    .warning-kicker {{ display:inline-block; margin-bottom:8px; padding:4px 8px; border-radius:999px; background:var(--bad); color:white; font-size:11px; font-weight:700; letter-spacing:.08em; }}
     table {{ width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden; }}
     th, td {{ padding:12px 10px; border-bottom:1px solid var(--line); text-align:left; font-size:14px; vertical-align:top; font-family:'Segoe UI', Arial, sans-serif; }}
     th {{ background:#fbf6ef; position:sticky; top:0; z-index:1; }}
@@ -685,6 +690,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     .win {{ background:#e8f5ee; color:var(--good); }}
     .loss {{ background:#fdecec; color:var(--bad); }}
     .muted {{ color:var(--muted); }}
+    .warning-row td {{ background:rgba(204,61,47,.05); }}
     .toolbar {{ display:flex; flex-wrap:wrap; gap:10px; margin:18px 0; }}
     .filter-btn, .tab-btn {{ border:1px solid var(--line); background:white; color:var(--text); border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; font-family:'Segoe UI', Arial, sans-serif; }}
     .filter-btn.active, .tab-btn.active {{ background:var(--accent); color:white; border-color:var(--accent); }}
@@ -700,11 +706,15 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div class=\"hero\">
       <h1>NBA Market Lifecycle Dashboard</h1>
       <p>Beijing-midnight daily workflow. The workbook captures game discovery, game-time snapshots, final winners, divergence warnings between Polymarket and Kalshi, and 10U fixed-stake PnL once results settle.</p>
+      <div class=\"hero-meta\">
+        <div class=\"hero-pill\">Last updated (Beijing): {updated_bjt}</div>
+        <div class=\"hero-pill\">Warning threshold: 0.05</div>
+      </div>
     </div>
     <div class=\"grid\">
       <div class=\"card\"><div class=\"label\">Total Rows</div><div class=\"value\">{summary['total_rows']}</div></div>
       <div class=\"card\"><div class=\"label\">Resolved Rows</div><div class=\"value\">{summary['resolved_rows']}</div></div>
-      <div class=\"card\"><div class=\"label\">Divergence Warnings</div><div class=\"value {'bad' if summary['warning_rows'] else ''}\">{summary['warning_rows']}</div></div>
+      <div class=\"card\"><div class=\"label\">Divergence Warnings</div><div class=\"value {'bad' if summary['warning_rows'] else ''}\">{summary['warning_rows']}</div><div class=\"label\">Cross-market gap &gt; 0.05</div></div>
       <div class=\"card\"><div class=\"label\">Wins</div><div class=\"value good\">{summary['wins']}</div></div>
       <div class=\"card\"><div class=\"label\">Losses</div><div class=\"value bad\">{summary['losses']}</div></div>
       <div class=\"card\"><div class=\"label\">Total PnL</div><div class=\"value {'good' if summary['total_pnl'] >= 0 else 'bad'}\">{summary['total_pnl']:.4f}U</div></div>
