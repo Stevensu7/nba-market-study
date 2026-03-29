@@ -1,0 +1,14 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.sqlite
+*.sqlite3
+logs/*.log
+data/raw/*.json
+data/processed/*.csv
+data/processed/*.json
+data/reports/*.png
+data/reports/*.csv
+data/reports/*.json

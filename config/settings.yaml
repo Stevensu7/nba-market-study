@@ -1,0 +1,50 @@
+project:
+  name: nba-market-study
+  timezone: UTC
+
+paths:
+  database: db/nba_market_study.sqlite
+  raw_data_dir: data/raw
+  processed_data_dir: data/processed
+  reports_dir: data/reports
+  logs_dir: logs
+
+apis:
+  polymarket_api_base_url: https://gamma-api.polymarket.com
+  polymarket_clob_base_url: https://clob.polymarket.com
+  kalshi_api_base_url: https://api.elections.kalshi.com/trade-api/v2
+  espn_scoreboard_base_url: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
+  timeout_seconds: 20
+
+collection:
+  default_platform: polymarket
+  snapshot_labels:
+    T-24h: 1440
+    T-1h: 60
+    T-30m: 30
+    T-5m: 5
+  snapshot_tolerance_minutes: 20
+  market_discovery_days_ahead: 7
+  market_discovery_limit: 500
+
+analysis:
+  default_snapshot_label: T-30m
+  default_price_field: mid_price
+  probability_bins: [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+  min_bin_samples: 3
+  smoothing_prior_strength: 5
+
+backtest:
+  fixed:
+    start_bankroll: 500.0
+    fixed_stake: 20.0
+    min_edge: 0.03
+  half_kelly:
+    start_bankroll: 500.0
+    min_edge: 0.03
+    max_bet: 50.0
+    min_bet: 5.0
+    kelly_fraction: 0.5
+
+logging:
+  level: INFO
