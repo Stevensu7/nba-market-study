@@ -7,19 +7,14 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: refresh-dashboard
   cancel-in-progress: true
 
 jobs:
-  refresh-and-deploy:
+  refresh-and-upload:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,7 +30,7 @@ jobs:
       - name: Refresh workbook and HTML
         run: python -m src.main refresh
 
-      - name: Prepare Pages artifact
+      - name: Prepare dashboard artifact
         run: |
           mkdir -p site
           cp backtest.html site/index.html
@@ -53,14 +48,8 @@ jobs:
           git diff --cached --quiet || git commit -m "refresh dashboard data"
           git push
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: dashboard-site
           path: site
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
