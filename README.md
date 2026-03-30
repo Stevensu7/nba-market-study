@@ -58,6 +58,8 @@ cp .env.example .env
 
 Supported values include:
 
+- `API_BASKETBALL_BASE_URL`
+- `API_BASKETBALL_KEY`
 - `POLYMARKET_API_BASE_URL`
 - `POLYMARKET_CLOB_BASE_URL`
 - `KALSHI_API_BASE_URL`
@@ -211,6 +213,8 @@ What it does during the day:
 - writes final winners after ESPN marks the game complete
 - recomputes 10U fixed-stake PnL
 - flags cross-market gaps when `|Polymarket - Kalshi| > 0.05`
+- fetches API-Basketball mainstream bookmaker odds consensus when `API_BASKETBALL_KEY` is configured
+- compares Polymarket and Kalshi probabilities against sportsbook consensus
 - rebuilds `backtest.xlsx` and `backtest.html`
 
 Convenience launcher:
@@ -227,6 +231,7 @@ The repository includes `.github/workflows/refresh-dashboard.yml`.
 - refreshes `backtest.xlsx` and `backtest.html`
 - commits updated artifacts back to the repository
 - deploys `backtest.html` and `backtest.xlsx` to GitHub Pages
+- reads sportsbook consensus from the `API_BASKETBALL_KEY` GitHub Actions secret when configured
 
 This schedule is more practical on GitHub than a single long-running process from Beijing midnight to the next midnight, while still capturing pregame, in-play boundary, and postgame updates throughout the day.
 
@@ -252,6 +257,7 @@ The default bet trigger is `edge >= 0.03`, configurable in `config/settings.yaml
 - Phase 1 does not place live orders or connect to wallet/authenticated trading APIs.
 - Polymarket public response fields can change. The client and collector are written to degrade gracefully, but some field names may need adjustment.
 - ESPN matching is a practical public-data bridge for home/away orientation and results, but team-name parsing can require further refinement.
+- API-Basketball sportsbook comparison depends on your plan and key permissions. If the API denies a season or game, the dashboard will show sportsbook data as unavailable rather than fail the whole refresh.
 - Liquidity and volume fields are recorded only if exposed by the public response.
 - No traditional sportsbook data is used.
 

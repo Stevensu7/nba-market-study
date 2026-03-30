@@ -13,6 +13,8 @@ from .utils import ensure_dir
 
 @dataclass(slots=True)
 class APISettings:
+    api_basketball_base_url: str
+    api_basketball_key: str | None
     polymarket_api_base_url: str
     polymarket_clob_base_url: str
     kalshi_api_base_url: str
@@ -88,6 +90,12 @@ class AppSettings:
 
 
 def _merge_env(cfg: dict[str, Any]) -> dict[str, Any]:
+    cfg["apis"]["api_basketball_base_url"] = os.getenv(
+        "API_BASKETBALL_BASE_URL", cfg["apis"]["api_basketball_base_url"]
+    )
+    cfg["apis"]["api_basketball_key"] = os.getenv(
+        "API_BASKETBALL_KEY", cfg["apis"].get("api_basketball_key")
+    )
     cfg["apis"]["polymarket_api_base_url"] = os.getenv(
         "POLYMARKET_API_BASE_URL", cfg["apis"]["polymarket_api_base_url"]
     )

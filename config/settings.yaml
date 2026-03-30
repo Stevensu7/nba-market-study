@@ -10,6 +10,8 @@ paths:
   logs_dir: logs
 
 apis:
+  api_basketball_base_url: https://v1.basketball.api-sports.io
+  api_basketball_key:
   polymarket_api_base_url: https://gamma-api.polymarket.com
   polymarket_clob_base_url: https://clob.polymarket.com
   kalshi_api_base_url: https://api.elections.kalshi.com/trade-api/v2

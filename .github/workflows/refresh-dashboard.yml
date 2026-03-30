@@ -33,6 +33,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Refresh workbook and HTML
+        env:
+          API_BASKETBALL_KEY: ${{ secrets.API_BASKETBALL_KEY }}
         run: python -m src.main refresh
 
       - name: Prepare dashboard artifact

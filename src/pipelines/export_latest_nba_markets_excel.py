@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
+from ..clients.api_basketball import APIBasketballClient, SportsbookConsensus
 from ..config import load_settings
 from ..logging_utils import setup_logging
 from ..utils import extract_matchup_teams, midpoint, normalize_team_name, parse_datetime, safe_float
@@ -397,6 +398,36 @@ def _normalize_existing_rows(existing: pd.DataFrame, schedule_map: dict[tuple[st
     return normalized
 
 
+def fetch_sportsbook_consensus(schedule_map: dict[tuple[str, str], UpcomingGame]) -> dict[tuple[str, str], SportsbookConsensus]:
+    settings = load_settings()
+    client = APIBasketballClient(settings)
+    if not client.enabled:
+        return {}
+    dates = sorted({game.game_time_utc[:10] for game in schedule_map.values() if game.game_time_utc})
+    consensus_map: dict[tuple[str, str], SportsbookConsensus] = {}
+    for date_str in dates:
+        try:
+            games = client.get_games_by_date(date_str)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("API-Basketball games lookup failed for %s: %s", date_str, exc)
+            continue
+        for game_payload in games:
+            home_team = normalize_team_name(str(game_payload.get("teams", {}).get("home", {}).get("name", "")))
+            away_team = normalize_team_name(str(game_payload.get("teams", {}).get("away", {}).get("name", "")))
+            matched = _find_schedule_game(home_team, away_team, schedule_map)
+            if matched is None:
+                continue
+            try:
+                consensus = client.build_consensus_for_game(game_payload)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("API-Basketball odds lookup failed for %s vs %s: %s", home_team, away_team, exc)
+                continue
+            consensus.home_team = matched.home_team
+            consensus.away_team = matched.away_team
+            consensus_map[(matched.home_team, matched.away_team)] = consensus
+    return consensus_map
+
+
 def _merge_rows(existing: pd.DataFrame, fresh_rows: list[dict[str, Any]]) -> pd.DataFrame:
     fresh_df = pd.DataFrame(fresh_rows)
     if existing.empty and fresh_df.empty:
@@ -417,7 +448,11 @@ def _merge_rows(existing: pd.DataFrame, fresh_rows: list[dict[str, Any]]) -> pd.
     return combined
 
 
-def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str], UpcomingGame]) -> pd.DataFrame:
+def _apply_results_and_pnl(
+    df: pd.DataFrame,
+    schedule_map: dict[tuple[str, str], UpcomingGame],
+    sportsbook_map: dict[tuple[str, str], SportsbookConsensus],
+) -> pd.DataFrame:
     if df.empty:
         return df
     work = df.copy()
@@ -429,6 +464,11 @@ def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str],
         "开赛快照时间UTC": "",
         "开赛主队概率": pd.NA,
         "开赛客队概率": pd.NA,
+        "主流博彩主队概率": pd.NA,
+        "主流博彩客队概率": pd.NA,
+        "主流博彩样本数": pd.NA,
+        "主流博彩来源": "",
+        "主流博彩状态": "",
         "主队概率": pd.NA,
         "客队概率": pd.NA,
         "预测嬴方": "",
@@ -438,6 +478,8 @@ def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str],
         "跨市场主队价差": pd.NA,
         "跨市场客队价差": pd.NA,
         "价差预警": "",
+        "相对主流博彩主队价差": pd.NA,
+        "相对主流博彩客队价差": pd.NA,
         "10U收益": pd.NA,
         "累计收益": pd.NA,
     }
@@ -450,6 +492,8 @@ def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str],
         "发现时间UTC",
         "状态",
         "开赛快照时间UTC",
+        "主流博彩来源",
+        "主流博彩状态",
         "预测嬴方",
         "实际嬴方（后续补充）",
         "是否命中",
@@ -475,6 +519,14 @@ def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str],
         if not _clean_text(row.get("发现时间UTC")):
             work.at[idx, "发现时间UTC"] = utc_now().isoformat()
         work.at[idx, "记录日期(北京时间)"] = _clean_text(row.get("记录日期(北京时间)")) or beijing_now().strftime("%Y-%m-%d")
+        if game:
+            consensus = sportsbook_map.get((game.home_team, game.away_team))
+            if consensus:
+                work.at[idx, "主流博彩主队概率"] = round(consensus.home_probability, 4) if consensus.home_probability is not None else pd.NA
+                work.at[idx, "主流博彩客队概率"] = round(consensus.away_probability, 4) if consensus.away_probability is not None else pd.NA
+                work.at[idx, "主流博彩样本数"] = consensus.bookmaker_count
+                work.at[idx, "主流博彩来源"] = ", ".join(consensus.bookmaker_names)
+                work.at[idx, "主流博彩状态"] = consensus.status if not consensus.message else f"{consensus.status}: {consensus.message}"
         prediction = _clean_text(work.at[idx, "预测嬴方"])
         actual = _clean_text(work.at[idx, "实际嬴方（后续补充）"])
         work.at[idx, "下注方向"] = prediction
@@ -512,6 +564,12 @@ def _apply_results_and_pnl(df: pd.DataFrame, schedule_map: dict[tuple[str, str],
         else:
             work.at[idx, "是否命中"] = ""
             work.at[idx, "10U收益"] = pd.NA
+        sportsbook_home = safe_float(work.at[idx, "主流博彩主队概率"])
+        sportsbook_away = safe_float(work.at[idx, "主流博彩客队概率"])
+        if home_prob is not None and sportsbook_home is not None:
+            work.at[idx, "相对主流博彩主队价差"] = round(home_prob - sportsbook_home, 4)
+        if away_prob is not None and sportsbook_away is not None:
+            work.at[idx, "相对主流博彩客队价差"] = round(away_prob - sportsbook_away, 4)
 
     group_cols = ["比赛时间", "主队", "客队"]
     for _, indices in work.groupby(group_cols, dropna=False).groups.items():
@@ -561,15 +619,34 @@ def _summary_metrics(df: pd.DataFrame) -> dict[str, Any]:
     warning_rows = 0
     if not df.empty and "价差预警" in df.columns:
         warning_rows = int((df["价差预警"].fillna("") == "YES").sum())
+    sportsbook_rows = 0
+    if not df.empty and "主流博彩样本数" in df.columns:
+        sportsbook_values = [safe_float(value) or 0.0 for value in df["主流博彩样本数"].tolist()]
+        sportsbook_rows = sum(1 for value in sportsbook_values if value > 0)
+    platform_metrics: dict[str, dict[str, Any]] = {}
+    if not resolved.empty and "平台" in resolved.columns:
+        for platform, subset in resolved.groupby("平台", dropna=False):
+            wins_by_platform = int((subset.get("是否命中", pd.Series(dtype=str)) == "win").sum())
+            losses_by_platform = int((subset.get("是否命中", pd.Series(dtype=str)) == "loss").sum())
+            settled_rows = int(len(subset))
+            accuracy = (wins_by_platform / settled_rows) if settled_rows else 0.0
+            platform_metrics[str(platform)] = {
+                "resolved_rows": settled_rows,
+                "wins": wins_by_platform,
+                "losses": losses_by_platform,
+                "accuracy": round(accuracy, 4),
+            }
     return {
         "total_rows": int(len(df)),
         "resolved_rows": int(len(resolved)),
         "warning_rows": warning_rows,
+        "sportsbook_rows": sportsbook_rows,
         "wins": wins,
         "losses": losses,
         "total_pnl": round(total_pnl, 4),
         "roi": round(roi, 4),
         "platform_counts": df["平台"].value_counts(dropna=False).to_dict() if not df.empty else {},
+        "platform_metrics": platform_metrics,
     }
 
 
@@ -618,6 +695,10 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
         result = _clean_text(row.get("是否命中"))
         status = _clean_text(row.get("状态"))
         warning = _clean_text(row.get("价差预警"))
+        sportsbook_home = _clean_text(row.get("主流博彩主队概率"))
+        sportsbook_away = _clean_text(row.get("主流博彩客队概率"))
+        sportsbook_diff_home = _clean_text(row.get("相对主流博彩主队价差"))
+        sportsbook_diff_away = _clean_text(row.get("相对主流博彩客队价差"))
         tag_class = "win" if result == "win" else "loss" if result == "loss" else "muted"
         row_class = "warning-row" if warning == "YES" else ""
         fragments.append(
@@ -627,6 +708,8 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
             f"<td>{_clean_text(row.get('主队'))}</td>"
             f"<td>{_clean_text(row.get('客队'))}</td>"
             f"<td>{_clean_text(row.get('赔率'))}</td>"
+            f"<td>{sportsbook_home} | {sportsbook_away}</td>"
+            f"<td>{sportsbook_diff_home} | {sportsbook_diff_away}</td>"
             f"<td>{_clean_text(row.get('预测嬴方'))}</td>"
             f"<td>{actual}</td>"
             f"<td>{status}</td>"
@@ -636,7 +719,7 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
             f"<td>{_clean_text(row.get('累计收益'))}</td>"
             "</tr>"
         )
-    return "".join(fragments) or "<tr><td colspan='12' class='muted'>No rows available.</td></tr>"
+    return "".join(fragments) or "<tr><td colspan='14' class='muted'>No rows available.</td></tr>"
 
 
 def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
@@ -655,6 +738,16 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
         f"<div class='warning-item'><div class='warning-kicker'>ALERT</div><div><strong>{_clean_text(row.get('主队'))} vs {_clean_text(row.get('客队'))}</strong></div><div class='muted'>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</div><div>Home gap: {_clean_text(row.get('跨市场主队价差'))} | Away gap: {_clean_text(row.get('跨市场客队价差'))}</div></div>"
         for row in warning_rows
     ) or "<div class='muted'>No divergence warnings above 0.05 right now.</div>"
+    platform_accuracy_cards = "".join(
+        (
+            f"<div class='platform-card'>"
+            f"<div class='platform-head'><span class='platform-name'>{platform}</span><span class='platform-accuracy'>{metrics['accuracy']:.1%}</span></div>"
+            f"<div class='platform-bar'><span style='width:{metrics['accuracy'] * 100:.1f}%'></span></div>"
+            f"<div class='platform-meta'>Resolved: {metrics['resolved_rows']} | Wins: {metrics['wins']} | Losses: {metrics['losses']}</div>"
+            f"</div>"
+        )
+        for platform, metrics in sorted(summary["platform_metrics"].items())
+    ) or "<div class='muted'>Prediction accuracy will appear after games settle.</div>"
     html = f"""<!doctype html>
 <html lang=\"zh-CN\">
 <head>
@@ -679,6 +772,14 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     .value.good {{ color:var(--good); }}
     .value.bad {{ color:var(--bad); }}
     .split {{ display:grid; grid-template-columns:1.35fr .65fr; gap:18px; margin-bottom:18px; }}
+    .platform-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }}
+    .platform-card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
+    .platform-head {{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }}
+    .platform-name {{ font-size:18px; font-weight:700; color:var(--ink); }}
+    .platform-accuracy {{ font-size:28px; font-weight:700; color:var(--accent); }}
+    .platform-bar {{ height:10px; border-radius:999px; background:#efe5d8; overflow:hidden; margin-bottom:10px; }}
+    .platform-bar span {{ display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #d97706, #0e8a4d); }}
+    .platform-meta {{ color:var(--muted); font-size:13px; font-family:'Segoe UI', Arial, sans-serif; }}
     .warning-item {{ padding:14px 14px 14px 16px; border:1px solid rgba(204,61,47,.18); border-left:5px solid var(--bad); border-radius:16px; background:linear-gradient(180deg, rgba(255,244,242,.98), rgba(255,250,248,.98)); margin-bottom:12px; font-family:'Segoe UI', Arial, sans-serif; }}
     .warning-item:last-child {{ border-bottom:none; }}
     .warning-kicker {{ display:inline-block; margin-bottom:8px; padding:4px 8px; border-radius:999px; background:var(--bad); color:white; font-size:11px; font-weight:700; letter-spacing:.08em; }}
@@ -714,6 +815,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div class=\"grid\">
       <div class=\"card\"><div class=\"label\">Total Rows</div><div class=\"value\">{summary['total_rows']}</div></div>
       <div class=\"card\"><div class=\"label\">Resolved Rows</div><div class=\"value\">{summary['resolved_rows']}</div></div>
+      <div class=\"card\"><div class=\"label\">Sportsbook Consensus Rows</div><div class=\"value\">{summary['sportsbook_rows']}</div><div class=\"label\">API-Basketball mainstream books</div></div>
       <div class=\"card\"><div class=\"label\">Divergence Warnings</div><div class=\"value {'bad' if summary['warning_rows'] else ''}\">{summary['warning_rows']}</div><div class=\"label\">Cross-market gap &gt; 0.05</div></div>
       <div class=\"card\"><div class=\"label\">Wins</div><div class=\"value good\">{summary['wins']}</div></div>
       <div class=\"card\"><div class=\"label\">Losses</div><div class=\"value bad\">{summary['losses']}</div></div>
@@ -730,6 +832,9 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
         {warning_html}
       </div>
     </div>
+    <div class="platform-grid">
+      {platform_accuracy_cards}
+    </div>
     <div class=\"card\" style=\"margin-bottom:20px\">
       <div class=\"label\">Platforms</div>
       <div>{', '.join(f'{k}: {v}' for k, v in summary['platform_counts'].items()) or 'None'}</div>
@@ -745,7 +850,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div id='all-panel' class='panel active'>
       <div class=\"table-wrap\">
         <table>
-          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
           <tbody id='all-body'>{all_rows_html}</tbody>
         </table>
       </div>
@@ -753,7 +858,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div id='settled-panel' class='panel'>
       <div class=\"table-wrap\">
         <table>
-          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
           <tbody id='settled-body'>{settled_rows_html}</tbody>
         </table>
       </div>
@@ -787,8 +892,9 @@ def export_excel(output_path: Path) -> Path:
     existing = _normalize_existing_rows(_load_existing_rows(output_path), schedule_map)
     polymarket_rows = fetch_polymarket_rows(schedule_map)
     kalshi_rows = fetch_kalshi_rows(schedule_map)
+    sportsbook_map = fetch_sportsbook_consensus(schedule_map)
     merged = _merge_rows(existing, polymarket_rows + kalshi_rows)
-    markets_df = _apply_results_and_pnl(merged, schedule_map)
+    markets_df = _apply_results_and_pnl(merged, schedule_map, sportsbook_map)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if markets_df.empty:
@@ -803,6 +909,11 @@ def export_excel(output_path: Path) -> Path:
                     "开赛快照时间UTC": pd.Series(dtype="string"),
                     "开赛主队概率": pd.Series(dtype="float"),
                     "开赛客队概率": pd.Series(dtype="float"),
+                    "主流博彩主队概率": pd.Series(dtype="float"),
+                    "主流博彩客队概率": pd.Series(dtype="float"),
+                    "主流博彩样本数": pd.Series(dtype="float"),
+                    "主流博彩来源": pd.Series(dtype="string"),
+                    "主流博彩状态": pd.Series(dtype="string"),
                     "主队": pd.Series(dtype="string"),
                     "客队": pd.Series(dtype="string"),
                     "主队概率": pd.Series(dtype="float"),
@@ -813,6 +924,8 @@ def export_excel(output_path: Path) -> Path:
                     "跨市场主队价差": pd.Series(dtype="float"),
                     "跨市场客队价差": pd.Series(dtype="float"),
                     "价差预警": pd.Series(dtype="string"),
+                    "相对主流博彩主队价差": pd.Series(dtype="float"),
+                    "相对主流博彩客队价差": pd.Series(dtype="float"),
                     "是否命中": pd.Series(dtype="string"),
                     "下注方向": pd.Series(dtype="string"),
                     "10U收益": pd.Series(dtype="float"),
@@ -831,6 +944,11 @@ def export_excel(output_path: Path) -> Path:
                     "开赛快照时间UTC",
                     "开赛主队概率",
                     "开赛客队概率",
+                    "主流博彩主队概率",
+                    "主流博彩客队概率",
+                    "主流博彩样本数",
+                    "主流博彩来源",
+                    "主流博彩状态",
                     "主队",
                     "客队",
                     "主队概率",
@@ -841,6 +959,8 @@ def export_excel(output_path: Path) -> Path:
                     "跨市场主队价差",
                     "跨市场客队价差",
                     "价差预警",
+                    "相对主流博彩主队价差",
+                    "相对主流博彩客队价差",
                     "是否命中",
                     "下注方向",
                     "10U收益",
