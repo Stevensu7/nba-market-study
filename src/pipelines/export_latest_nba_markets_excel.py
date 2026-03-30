@@ -636,6 +636,19 @@ def _summary_metrics(df: pd.DataFrame) -> dict[str, Any]:
                 "losses": losses_by_platform,
                 "accuracy": round(accuracy, 4),
             }
+    comparison_metrics: dict[str, dict[str, Any]] = {}
+    if not df.empty and "平台" in df.columns:
+        for platform, subset in df.groupby("平台", dropna=False):
+            home_series = subset["相对主流博彩主队价差"] if "相对主流博彩主队价差" in subset.columns else pd.Series(dtype=float)
+            away_series = subset["相对主流博彩客队价差"] if "相对主流博彩客队价差" in subset.columns else pd.Series(dtype=float)
+            home_vals = [safe_float(value) for value in home_series.tolist()]
+            away_vals = [safe_float(value) for value in away_series.tolist()]
+            merged_diffs = [abs(value) for value in home_vals + away_vals if value is not None]
+            comparison_metrics[str(platform)] = {
+                "rows": int(len(merged_diffs) / 2) if merged_diffs else 0,
+                "avg_abs_gap": round(sum(merged_diffs) / len(merged_diffs), 4) if merged_diffs else 0.0,
+                "max_abs_gap": round(max(merged_diffs), 4) if merged_diffs else 0.0,
+            }
     return {
         "total_rows": int(len(df)),
         "resolved_rows": int(len(resolved)),
@@ -647,6 +660,7 @@ def _summary_metrics(df: pd.DataFrame) -> dict[str, Any]:
         "roi": round(roi, 4),
         "platform_counts": df["平台"].value_counts(dropna=False).to_dict() if not df.empty else {},
         "platform_metrics": platform_metrics,
+        "comparison_metrics": comparison_metrics,
     }
 
 
@@ -699,6 +713,7 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
         sportsbook_away = _clean_text(row.get("主流博彩客队概率"))
         sportsbook_diff_home = _clean_text(row.get("相对主流博彩主队价差"))
         sportsbook_diff_away = _clean_text(row.get("相对主流博彩客队价差"))
+        sportsbook_sources = _clean_text(row.get("主流博彩来源"))
         tag_class = "win" if result == "win" else "loss" if result == "loss" else "muted"
         row_class = "warning-row" if warning == "YES" else ""
         fragments.append(
@@ -710,6 +725,7 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
             f"<td>{_clean_text(row.get('赔率'))}</td>"
             f"<td>{sportsbook_home} | {sportsbook_away}</td>"
             f"<td>{sportsbook_diff_home} | {sportsbook_diff_away}</td>"
+            f"<td>{sportsbook_sources}</td>"
             f"<td>{_clean_text(row.get('预测嬴方'))}</td>"
             f"<td>{actual}</td>"
             f"<td>{status}</td>"
@@ -719,7 +735,7 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
             f"<td>{_clean_text(row.get('累计收益'))}</td>"
             "</tr>"
         )
-    return "".join(fragments) or "<tr><td colspan='14' class='muted'>No rows available.</td></tr>"
+    return "".join(fragments) or "<tr><td colspan='15' class='muted'>No rows available.</td></tr>"
 
 
 def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
@@ -748,6 +764,17 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
         )
         for platform, metrics in sorted(summary["platform_metrics"].items())
     ) or "<div class='muted'>Prediction accuracy will appear after games settle.</div>"
+    comparison_cards = "".join(
+        (
+            f"<div class='comparison-card'>"
+            f"<div class='comparison-title'>{platform} vs Sportsbook</div>"
+            f"<div class='comparison-metric'>Avg abs gap: {metrics['avg_abs_gap']:.4f}</div>"
+            f"<div class='comparison-sub'>Rows: {metrics['rows']} | Max abs gap: {metrics['max_abs_gap']:.4f}</div>"
+            f"</div>"
+        )
+        for platform, metrics in sorted(summary["comparison_metrics"].items())
+        if platform in {"Polymarket", "Kalshi"}
+    ) or "<div class='muted'>Sportsbook comparison cards will appear when API-Basketball consensus is available.</div>"
     html = f"""<!doctype html>
 <html lang=\"zh-CN\">
 <head>
@@ -773,7 +800,12 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     .value.bad {{ color:var(--bad); }}
     .split {{ display:grid; grid-template-columns:1.35fr .65fr; gap:18px; margin-bottom:18px; }}
     .platform-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }}
+    .comparison-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }}
     .platform-card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
+    .comparison-card {{ background:linear-gradient(180deg, rgba(255,250,245,.96), rgba(255,255,255,.88)); border:1px solid rgba(182,90,42,.18); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
+    .comparison-title {{ font-size:18px; font-weight:700; color:var(--ink); margin-bottom:8px; }}
+    .comparison-metric {{ font-size:26px; font-weight:700; color:var(--accent); margin-bottom:6px; }}
+    .comparison-sub {{ color:var(--muted); font-size:13px; font-family:'Segoe UI', Arial, sans-serif; }}
     .platform-head {{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }}
     .platform-name {{ font-size:18px; font-weight:700; color:var(--ink); }}
     .platform-accuracy {{ font-size:28px; font-weight:700; color:var(--accent); }}
@@ -835,6 +867,9 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div class="platform-grid">
       {platform_accuracy_cards}
     </div>
+    <div class="comparison-grid">
+      {comparison_cards}
+    </div>
     <div class=\"card\" style=\"margin-bottom:20px\">
       <div class=\"label\">Platforms</div>
       <div>{', '.join(f'{k}: {v}' for k, v in summary['platform_counts'].items()) or 'None'}</div>
@@ -850,7 +885,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div id='all-panel' class='panel active'>
       <div class=\"table-wrap\">
         <table>
-          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
           <tbody id='all-body'>{all_rows_html}</tbody>
         </table>
       </div>
@@ -858,7 +893,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     <div id='settled-panel' class='panel'>
       <div class=\"table-wrap\">
         <table>
-          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
           <tbody id='settled-body'>{settled_rows_html}</tbody>
         </table>
       </div>
