@@ -263,11 +263,53 @@ def _parse_polymarket_cards(html: str) -> list[dict[str, Any]]:
     return cards
 
 
+def _extract_polymarket_game_slugs(html: str) -> list[str]:
+    slugs = re.findall(r'/event/(nba-[a-z0-9-]+-20\d{2}-\d{2}-\d{2})', html)
+    unique: list[str] = []
+    for slug in slugs:
+        if slug not in unique:
+            unique.append(slug)
+    return unique
+
+
+def _parse_polymarket_event_page(slug: str, html: str) -> dict[str, Any] | None:
+    price_match = re.search(
+        r'([A-Za-z .\'-]+) is currently priced at (\d+) .*? and ([A-Za-z .\'-]+) at (\d+)',
+        html,
+        flags=re.IGNORECASE,
+    )
+    if not price_match:
+        return None
+    team1 = normalize_team_name(price_match.group(1))
+    team2 = normalize_team_name(price_match.group(3))
+    price1 = float(price_match.group(2)) / 100.0
+    price2 = float(price_match.group(4)) / 100.0
+    breadcrumb_match = re.search(r'"name":"([A-Za-z .\'-]+) vs\.? ([A-Za-z .\'-]+)"', html)
+    if breadcrumb_match:
+        team1 = normalize_team_name(breadcrumb_match.group(1))
+        team2 = normalize_team_name(breadcrumb_match.group(2))
+    return {"slug": slug, "team1": team1, "team2": team2, "p1": price1, "p2": price2}
+
+
 def fetch_polymarket_rows(schedule_map: dict[tuple[str, str], UpcomingGame]) -> list[dict[str, Any]]:
-    now = datetime.now(UTC)
+    now = utc_now()
     rows: dict[tuple[str, str], dict[str, Any]] = {}
-    html = requests.get("https://polymarket.com/sports/nba", timeout=30).text
-    for card in _parse_polymarket_cards(html):
+    session = requests.Session()
+    session.headers.update({"User-Agent": "nba-market-study/0.1"})
+    html = session.get("https://polymarket.com/sports/nba", timeout=30).text
+    cards = _parse_polymarket_cards(html)
+    card_by_slug = {card["slug"]: card for card in cards}
+    for slug in _extract_polymarket_game_slugs(html):
+        card = card_by_slug.get(slug)
+        if card is None:
+            try:
+                event_html = session.get(f"https://polymarket.com/event/{slug}", timeout=30).text
+            except requests.RequestException as exc:
+                logger.warning("Failed to load Polymarket event page %s: %s", slug, exc)
+                continue
+            card = _parse_polymarket_event_page(slug, event_html)
+        if card is None:
+            continue
         team1 = card["team1"]
         team2 = card["team2"]
         matched_game = None
@@ -323,7 +365,11 @@ def fetch_kalshi_rows(schedule_map: dict[tuple[str, str], UpcomingGame]) -> list
         if event_ticker in seen_tickers:
             continue
         seen_tickers.add(event_ticker)
-        response = requests.get(f"{base_url}/events/{event_ticker}", timeout=30)
+        try:
+            response = requests.get(f"{base_url}/events/{event_ticker}", timeout=30)
+        except requests.RequestException as exc:
+            logger.warning("Kalshi event fetch failed for %s: %s", event_ticker, exc)
+            continue
         if response.status_code == 404:
             continue
         response.raise_for_status()
@@ -464,6 +510,8 @@ def _apply_results_and_pnl(
         "开赛快照时间UTC": "",
         "开赛主队概率": pd.NA,
         "开赛客队概率": pd.NA,
+        "开赛主流博彩主队概率": pd.NA,
+        "开赛主流博彩客队概率": pd.NA,
         "主流博彩主队概率": pd.NA,
         "主流博彩客队概率": pd.NA,
         "主流博彩样本数": pd.NA,
@@ -492,6 +540,8 @@ def _apply_results_and_pnl(
         "发现时间UTC",
         "状态",
         "开赛快照时间UTC",
+        "开赛主流博彩主队概率",
+        "开赛主流博彩客队概率",
         "主流博彩来源",
         "主流博彩状态",
         "预测嬴方",
@@ -542,20 +592,35 @@ def _apply_results_and_pnl(
             away_prob = away_prob if away_prob is not None else parsed_away_prob
             work.at[idx, "主队概率"] = home_prob
             work.at[idx, "客队概率"] = away_prob
+        sportsbook_home = safe_float(work.at[idx, "主流博彩主队概率"])
+        sportsbook_away = safe_float(work.at[idx, "主流博彩客队概率"])
         game_time = parse_datetime(_clean_text(row.get("比赛时间")))
         start_home_prob = safe_float(work.at[idx, "开赛主队概率"])
         start_away_prob = safe_float(work.at[idx, "开赛客队概率"])
-        if game_time is not None and utc_now() >= game_time and (start_home_prob is None and start_away_prob is None):
+        start_sportsbook_home = safe_float(work.at[idx, "开赛主流博彩主队概率"])
+        start_sportsbook_away = safe_float(work.at[idx, "开赛主流博彩客队概率"])
+        should_freeze_start = bool(
+            game is not None
+            and game_time is not None
+            and game_time <= utc_now()
+            and not game.completed
+            and (start_home_prob is None and start_away_prob is None)
+        )
+        if should_freeze_start:
             work.at[idx, "开赛快照时间UTC"] = utc_now().isoformat()
             work.at[idx, "开赛主队概率"] = home_prob
             work.at[idx, "开赛客队概率"] = away_prob
+            work.at[idx, "开赛主流博彩主队概率"] = sportsbook_home
+            work.at[idx, "开赛主流博彩客队概率"] = sportsbook_away
             start_home_prob = home_prob
             start_away_prob = away_prob
+            start_sportsbook_home = sportsbook_home
+            start_sportsbook_away = sportsbook_away
         bet_prob = None
         if prediction and prediction == _clean_text(row.get("主队")):
-            bet_prob = start_home_prob if start_home_prob is not None else home_prob
+            bet_prob = start_home_prob
         elif prediction and prediction == _clean_text(row.get("客队")):
-            bet_prob = start_away_prob if start_away_prob is not None else away_prob
+            bet_prob = start_away_prob
         if prediction and actual and bet_prob is not None and 0 < bet_prob < 1:
             hit = prediction == actual
             pnl = 10.0 * ((1 - bet_prob) / bet_prob) if hit else -10.0
@@ -564,8 +629,6 @@ def _apply_results_and_pnl(
         else:
             work.at[idx, "是否命中"] = ""
             work.at[idx, "10U收益"] = pd.NA
-        sportsbook_home = safe_float(work.at[idx, "主流博彩主队概率"])
-        sportsbook_away = safe_float(work.at[idx, "主流博彩客队概率"])
         if home_prob is not None and sportsbook_home is not None:
             work.at[idx, "相对主流博彩主队价差"] = round(home_prob - sportsbook_home, 4)
         if away_prob is not None and sportsbook_away is not None:
@@ -728,9 +791,9 @@ def _build_roi_bin_table(df: pd.DataFrame) -> str:
                 continue
             prob = None
             if _clean_text(row.get("预测嬴方")) == _clean_text(row.get("主队")):
-                prob = safe_float(row.get("开赛主队概率")) or safe_float(row.get("主队概率"))
+                prob = safe_float(row.get("开赛主队概率"))
             elif _clean_text(row.get("预测嬴方")) == _clean_text(row.get("客队")):
-                prob = safe_float(row.get("开赛客队概率")) or safe_float(row.get("客队概率"))
+                prob = safe_float(row.get("开赛客队概率"))
             pnl = safe_float(row.get("10U收益"))
             records.append((prob, pnl))
         platform_rows.append((platform, compute_platform_roi(records)))
@@ -745,8 +808,8 @@ def _build_roi_bin_table(df: pd.DataFrame) -> str:
         actual = _clean_text(row.get("实际嬴方（后续补充）"))
         if not actual:
             continue
-        home_prob = safe_float(row.get("主流博彩主队概率"))
-        away_prob = safe_float(row.get("主流博彩客队概率"))
+        home_prob = safe_float(row.get("开赛主流博彩主队概率"))
+        away_prob = safe_float(row.get("开赛主流博彩客队概率"))
         if home_prob is None and away_prob is None:
             continue
         predicted = _clean_text(row.get("主队")) if (home_prob or -1) >= (away_prob or -1) else _clean_text(row.get("客队"))
@@ -1024,6 +1087,8 @@ def export_excel(output_path: Path) -> Path:
                     "开赛快照时间UTC": pd.Series(dtype="string"),
                     "开赛主队概率": pd.Series(dtype="float"),
                     "开赛客队概率": pd.Series(dtype="float"),
+                    "开赛主流博彩主队概率": pd.Series(dtype="float"),
+                    "开赛主流博彩客队概率": pd.Series(dtype="float"),
                     "主流博彩主队概率": pd.Series(dtype="float"),
                     "主流博彩客队概率": pd.Series(dtype="float"),
                     "主流博彩样本数": pd.Series(dtype="float"),
@@ -1059,6 +1124,8 @@ def export_excel(output_path: Path) -> Path:
                     "开赛快照时间UTC",
                     "开赛主队概率",
                     "开赛客队概率",
+                    "开赛主流博彩主队概率",
+                    "开赛主流博彩客队概率",
                     "主流博彩主队概率",
                     "主流博彩客队概率",
                     "主流博彩样本数",
