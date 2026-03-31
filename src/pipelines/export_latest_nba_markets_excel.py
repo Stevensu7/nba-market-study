@@ -856,52 +856,55 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>Backtest Dashboard</title>
   <style>
-    :root {{ --bg:#f3efe8; --card:#fffdf8; --text:#1d2736; --muted:#6f7481; --line:#e6ddd0; --good:#0e8a4d; --bad:#cc3d2f; --accent:#b65a2a; --ink:#102034; }}
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+    :root {{ --bg:#efe6d5; --bg-deep:#d5b38a; --card:#fffaf1; --text:#172230; --muted:#6d7078; --line:#dfcfbb; --good:#0f8a52; --bad:#c23a2b; --accent:#bd5b2b; --ink:#0f1f33; --navy:#12263f; --sand:#f7e8d2; --gold:#df9b42; }}
     * {{ box-sizing:border-box; }}
-    body {{ margin:0; font-family:Georgia, 'Segoe UI', serif; background:radial-gradient(circle at top left, #f4d8c4 0, #f7f0e7 22%, #f3efe8 65%); color:var(--text); }}
-    .wrap {{ max-width:1280px; margin:0 auto; padding:36px 20px 56px; }}
-    .hero {{ margin-bottom:24px; padding:28px; border:1px solid rgba(182,90,42,.18); border-radius:24px; background:linear-gradient(135deg, rgba(255,250,245,.92), rgba(255,255,255,.72)); box-shadow:0 16px 44px rgba(86,47,25,.08); position:relative; overflow:hidden; }}
-    .hero:before {{ content:''; position:absolute; inset:auto -60px -80px auto; width:220px; height:220px; background:radial-gradient(circle, rgba(182,90,42,.22), rgba(182,90,42,0)); border-radius:50%; }}
-    .hero h1 {{ margin:0 0 10px; font-size:38px; letter-spacing:.2px; color:var(--ink); }}
-    .hero p {{ margin:0; color:var(--muted); max-width:760px; line-height:1.6; font-family:'Segoe UI', Arial, sans-serif; }}
-    .hero-meta {{ margin-top:16px; display:flex; gap:12px; flex-wrap:wrap; font-family:'Segoe UI', Arial, sans-serif; }}
-    .hero-pill {{ display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:rgba(255,255,255,.76); border:1px solid rgba(182,90,42,.18); color:var(--ink); font-size:13px; }}
+    body {{ margin:0; font-family:'IBM Plex Sans', 'Segoe UI', sans-serif; background:linear-gradient(180deg, #f5ecdc 0%, #efe6d5 45%, #e8dcc9 100%); color:var(--text); }}
+    .wrap {{ max-width:1320px; margin:0 auto; padding:26px 20px 60px; }}
+    .topband {{ margin-bottom:18px; padding:10px 16px; border-radius:999px; background:linear-gradient(90deg, var(--navy), #1c3b5f, var(--accent)); color:#fff7ed; letter-spacing:.08em; text-transform:uppercase; font-size:12px; font-weight:700; box-shadow:0 18px 40px rgba(18,38,63,.16); }}
+    .hero {{ margin-bottom:26px; padding:30px; border:1px solid rgba(18,38,63,.1); border-radius:28px; background:linear-gradient(135deg, rgba(255,251,245,.98), rgba(255,242,225,.9)); box-shadow:0 24px 60px rgba(54,32,16,.1); position:relative; overflow:hidden; }}
+    .hero:before {{ content:''; position:absolute; top:-40px; right:-60px; width:240px; height:240px; background:radial-gradient(circle, rgba(223,155,66,.34), rgba(223,155,66,0)); border-radius:50%; }}
+    .hero:after {{ content:''; position:absolute; inset:auto auto -28px -24px; width:220px; height:90px; background:linear-gradient(90deg, rgba(18,38,63,.18), rgba(18,38,63,0)); transform:rotate(-9deg); }}
+    .hero h1 {{ margin:0 0 10px; font-family:'Bebas Neue', Impact, sans-serif; font-size:70px; line-height:.95; letter-spacing:.04em; color:var(--navy); }}
+    .hero p {{ margin:0; color:var(--muted); max-width:760px; line-height:1.7; font-size:15px; }}
+    .hero-meta {{ margin-top:18px; display:flex; gap:12px; flex-wrap:wrap; }}
+    .hero-pill {{ display:inline-flex; align-items:center; gap:8px; padding:9px 13px; border-radius:999px; background:rgba(255,255,255,.88); border:1px solid rgba(18,38,63,.1); color:var(--navy); font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; margin:24px 0; }}
-    .card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
-    .label {{ color:var(--muted); font-size:13px; margin-bottom:8px; font-family:'Segoe UI', Arial, sans-serif; }}
-    .value {{ font-size:28px; font-weight:700; }}
+    .card {{ background:linear-gradient(180deg, rgba(255,250,241,.98), rgba(255,255,255,.9)); border:1px solid var(--line); border-radius:22px; padding:18px; box-shadow:0 18px 38px rgba(57,35,16,.08); }}
+    .label {{ color:var(--muted); font-size:12px; margin-bottom:8px; letter-spacing:.06em; text-transform:uppercase; font-weight:700; }}
+    .value {{ font-size:32px; font-weight:700; color:var(--navy); }}
     .value.good {{ color:var(--good); }}
     .value.bad {{ color:var(--bad); }}
     .split {{ display:grid; grid-template-columns:1.35fr .65fr; gap:18px; margin-bottom:18px; }}
     .platform-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }}
     .comparison-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }}
-    .platform-card {{ background:var(--card); border:1px solid var(--line); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
-    .comparison-card {{ background:linear-gradient(180deg, rgba(255,250,245,.96), rgba(255,255,255,.88)); border:1px solid rgba(182,90,42,.18); border-radius:20px; padding:18px; box-shadow:0 14px 34px rgba(46,32,20,.06); }}
+    .platform-card {{ background:linear-gradient(180deg, rgba(18,38,63,.96), rgba(24,51,82,.94)); color:#f7ead8; border:1px solid rgba(18,38,63,.08); border-radius:24px; padding:18px; box-shadow:0 18px 40px rgba(18,38,63,.18); }}
+    .comparison-card {{ background:linear-gradient(180deg, rgba(255,247,236,.98), rgba(255,255,255,.9)); border:1px solid rgba(189,91,43,.16); border-radius:22px; padding:18px; box-shadow:0 18px 38px rgba(57,35,16,.08); }}
     .roi-card {{ margin-bottom:20px; }}
     .comparison-title {{ font-size:18px; font-weight:700; color:var(--ink); margin-bottom:8px; }}
     .comparison-metric {{ font-size:26px; font-weight:700; color:var(--accent); margin-bottom:6px; }}
-    .comparison-sub {{ color:var(--muted); font-size:13px; font-family:'Segoe UI', Arial, sans-serif; }}
+    .comparison-sub {{ color:var(--muted); font-size:13px; }}
     .platform-head {{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }}
-    .platform-name {{ font-size:18px; font-weight:700; color:var(--ink); }}
-    .platform-accuracy {{ font-size:28px; font-weight:700; color:var(--accent); }}
-    .platform-bar {{ height:10px; border-radius:999px; background:#efe5d8; overflow:hidden; margin-bottom:10px; }}
-    .platform-bar span {{ display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #d97706, #0e8a4d); }}
-    .platform-meta {{ color:var(--muted); font-size:13px; font-family:'Segoe UI', Arial, sans-serif; }}
-    .warning-item {{ padding:14px 14px 14px 16px; border:1px solid rgba(204,61,47,.18); border-left:5px solid var(--bad); border-radius:16px; background:linear-gradient(180deg, rgba(255,244,242,.98), rgba(255,250,248,.98)); margin-bottom:12px; font-family:'Segoe UI', Arial, sans-serif; }}
+    .platform-name {{ font-size:20px; font-weight:700; color:#fff7ed; }}
+    .platform-accuracy {{ font-size:30px; font-weight:700; color:#ffd38f; }}
+    .platform-bar {{ height:10px; border-radius:999px; background:rgba(255,255,255,.12); overflow:hidden; margin-bottom:10px; }}
+    .platform-bar span {{ display:block; height:100%; border-radius:999px; background:linear-gradient(90deg, #df9b42, #22c55e); }}
+    .platform-meta {{ color:#d8deeb; font-size:13px; }}
+    .warning-item {{ padding:16px 16px 16px 18px; border:1px solid rgba(194,58,43,.22); border-left:6px solid var(--bad); border-radius:18px; background:linear-gradient(180deg, rgba(255,240,236,.99), rgba(255,250,246,.99)); margin-bottom:12px; }}
     .warning-item:last-child {{ border-bottom:none; }}
     .warning-kicker {{ display:inline-block; margin-bottom:8px; padding:4px 8px; border-radius:999px; background:var(--bad); color:white; font-size:11px; font-weight:700; letter-spacing:.08em; }}
-    table {{ width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden; }}
-    th, td {{ padding:12px 10px; border-bottom:1px solid var(--line); text-align:left; font-size:14px; vertical-align:top; font-family:'Segoe UI', Arial, sans-serif; }}
-    th {{ background:#fbf6ef; position:sticky; top:0; z-index:1; }}
-    .table-wrap {{ overflow:auto; border-radius:16px; box-shadow:0 10px 30px rgba(15,23,42,.06); }}
+    table {{ width:100%; border-collapse:collapse; background:rgba(255,252,246,.98); border:1px solid var(--line); border-radius:18px; overflow:hidden; }}
+    th, td {{ padding:13px 10px; border-bottom:1px solid rgba(223,207,187,.8); text-align:left; font-size:14px; vertical-align:top; }}
+    th {{ background:linear-gradient(180deg, #132a46, #193655); color:#fdf4ea; position:sticky; top:0; z-index:1; font-size:12px; letter-spacing:.06em; text-transform:uppercase; }}
+    .table-wrap {{ overflow:auto; border-radius:18px; box-shadow:0 12px 28px rgba(15,23,42,.08); }}
     .tag {{ display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; font-weight:600; }}
     .win {{ background:#e8f5ee; color:var(--good); }}
     .loss {{ background:#fdecec; color:var(--bad); }}
     .muted {{ color:var(--muted); }}
     .warning-row td {{ background:rgba(204,61,47,.05); }}
     .toolbar {{ display:flex; flex-wrap:wrap; gap:10px; margin:18px 0; }}
-    .filter-btn, .tab-btn {{ border:1px solid var(--line); background:white; color:var(--text); border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; font-family:'Segoe UI', Arial, sans-serif; }}
-    .filter-btn.active, .tab-btn.active {{ background:var(--accent); color:white; border-color:var(--accent); }}
+    .filter-btn, .tab-btn {{ border:1px solid rgba(18,38,63,.12); background:rgba(255,255,255,.92); color:var(--text); border-radius:999px; padding:9px 15px; cursor:pointer; font-weight:700; letter-spacing:.02em; }}
+    .filter-btn.active, .tab-btn.active {{ background:linear-gradient(90deg, var(--accent), #d97706); color:white; border-color:transparent; }}
     .panel {{ display:none; }}
     .panel.active {{ display:block; }}
     .chart {{ width:100%; height:260px; display:block; }}
@@ -911,6 +914,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
 </head>
 <body>
   <div class=\"wrap\">
+    <div class=\"topband\">Polymarket x Kalshi x Sportsbook consensus monitor</div>
     <div class=\"hero\">
       <h1>NBA Market Lifecycle Dashboard</h1>
       <p>Beijing-midnight daily workflow. The workbook captures game discovery, game-time snapshots, final winners, divergence warnings between Polymarket and Kalshi, and 10U fixed-stake PnL once results settle.</p>
