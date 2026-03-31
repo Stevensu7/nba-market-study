@@ -835,6 +835,80 @@ def _build_roi_bin_table(df: pd.DataFrame) -> str:
     )
 
 
+def _build_accuracy_bin_table(df: pd.DataFrame) -> str:
+    bins = [(0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.0)]
+
+    def in_bin(probability: float, left: float, right: float) -> bool:
+        if right >= 1.0:
+            return left <= probability <= right
+        return left <= probability < right
+
+    def compute_platform_accuracy(records: list[tuple[float | None, int | None]]) -> list[str]:
+        values: list[str] = []
+        for left, right in bins:
+            bucket = [hit for prob, hit in records if prob is not None and hit is not None and in_bin(prob, left, right)]
+            if not bucket:
+                values.append("-")
+                continue
+            accuracy = sum(bucket) / len(bucket)
+            values.append(f"{accuracy:.1%} ({len(bucket)})")
+        return values
+
+    platform_rows: list[tuple[str, list[str]]] = []
+    for platform in ["Polymarket", "Kalshi"]:
+        records: list[tuple[float | None, int | None]] = []
+        for row in df.to_dict(orient="records"):
+            if _clean_text(row.get("平台")) != platform:
+                continue
+            actual = _clean_text(row.get("实际嬴方（后续补充）"))
+            if not actual:
+                continue
+            prob = None
+            predicted = _clean_text(row.get("预测嬴方"))
+            if predicted == _clean_text(row.get("主队")):
+                prob = safe_float(row.get("开赛主队概率"))
+            elif predicted == _clean_text(row.get("客队")):
+                prob = safe_float(row.get("开赛客队概率"))
+            hit = 1 if predicted and predicted == actual else 0
+            records.append((prob, hit))
+        platform_rows.append((platform, compute_platform_accuracy(records)))
+
+    sportsbook_records: list[tuple[float | None, int | None]] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for row in df.to_dict(orient="records"):
+        key = (_clean_text(row.get("比赛时间")), _clean_text(row.get("主队")), _clean_text(row.get("客队")))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        actual = _clean_text(row.get("实际嬴方（后续补充）"))
+        if not actual:
+            continue
+        home_prob = safe_float(row.get("开赛主流博彩主队概率"))
+        away_prob = safe_float(row.get("开赛主流博彩客队概率"))
+        if home_prob is None and away_prob is None:
+            continue
+        predicted = _clean_text(row.get("主队")) if (home_prob or -1) >= (away_prob or -1) else _clean_text(row.get("客队"))
+        q = home_prob if predicted == _clean_text(row.get("主队")) else away_prob
+        if q is None:
+            continue
+        sportsbook_records.append((q, 1 if predicted == actual else 0))
+    platform_rows.append(("Sportsbook", compute_platform_accuracy(sportsbook_records)))
+
+    header = "".join(f"<th>{left:.1f}-{right:.1f}</th>" if right < 1.0 else f"<th>{left:.1f}-1.0</th>" for left, right in bins)
+    body = "".join(
+        f"<tr><td><strong>{name}</strong></td>{''.join(f'<td>{value}</td>' for value in values)}</tr>" for name, values in platform_rows
+    )
+    return (
+        "<div class='card roi-card'>"
+        "<div class='label'>Probability Bin Accuracy</div>"
+        "<div class='table-wrap'><table><thead><tr><th>Platform</th>"
+        + header
+        + "</tr></thead><tbody>"
+        + body
+        + "</tbody></table></div></div>"
+    )
+
+
 def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> str:
     fragments: list[str] = []
     for row in rows:
@@ -886,6 +960,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
     settled_rows_html = _table_rows_html(rows_json, settled_only=True)
     chart_html = _build_equity_svg(df)
     roi_bin_table_html = _build_roi_bin_table(df)
+    accuracy_bin_table_html = _build_accuracy_bin_table(df)
     warning_rows = [row for row in rows_json if _clean_text(row.get("价差预警")) == "YES"]
     warning_html = "".join(
         f"<div class='warning-item'><div class='warning-kicker'>ALERT</div><div><strong>{_clean_text(row.get('主队'))} vs {_clean_text(row.get('客队'))}</strong></div><div class='muted'>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</div><div>Home gap: {_clean_text(row.get('跨市场主队价差'))} | Away gap: {_clean_text(row.get('跨市场客队价差'))}</div></div>"
@@ -986,6 +1061,7 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
         <div class=\"hero-pill\">Warning threshold: 0.05</div>
       </div>
     </div>
+    {accuracy_bin_table_html}
     {roi_bin_table_html}
     <div class=\"grid\">
       <div class=\"card\"><div class=\"label\">Total Rows</div><div class=\"value\">{summary['total_rows']}</div></div>
