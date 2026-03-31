@@ -24,6 +24,8 @@ MAINSTREAM_BOOKMAKERS = [
     "Betway",
 ]
 
+PREFERRED_BOOKMAKERS = ["Bet365", "Pinnacle"]
+
 
 @dataclass(slots=True)
 class SportsbookConsensus:
@@ -85,7 +87,10 @@ class APIBasketballClient:
         home_team = str(game_payload.get("teams", {}).get("home", {}).get("name", ""))
         away_team = str(game_payload.get("teams", {}).get("away", {}).get("name", ""))
         game_time_utc = str(game_payload.get("date", ""))
-        odds_payload = self.get_odds_by_game(int(game_payload.get("id")))
+        game_id = game_payload.get("id")
+        if game_id is None:
+            return SportsbookConsensus(home_team, away_team, game_time_utc, None, None, 0, [], "unavailable", "Missing game id")
+        odds_payload = self.get_odds_by_game(int(game_id))
         errors = odds_payload.get("errors", {}) or {}
         if errors:
             message = "; ".join(f"{key}: {value}" for key, value in errors.items())
@@ -94,9 +99,7 @@ class APIBasketballClient:
         if not responses:
             return SportsbookConsensus(home_team, away_team, game_time_utc, None, None, 0, [], "unavailable", "No odds returned")
         bookmakers = responses[0].get("bookmakers", [])
-        home_probs: list[float] = []
-        away_probs: list[float] = []
-        bookmaker_names: list[str] = []
+        captured: list[tuple[str, float, float]] = []
         for bookmaker in bookmakers:
             name = str(bookmaker.get("name") or "")
             if name not in MAINSTREAM_BOOKMAKERS:
@@ -114,11 +117,22 @@ class APIBasketballClient:
             total = raw_home + raw_away
             if total <= 0:
                 continue
-            home_probs.append(raw_home / total)
-            away_probs.append(raw_away / total)
-            bookmaker_names.append(name)
-        if not home_probs or not away_probs:
+            captured.append((name, raw_home / total, raw_away / total))
+        selected = [item for item in captured if item[0] in PREFERRED_BOOKMAKERS]
+        if len(selected) < 1:
+            selected = captured[:2]
+        elif len(selected) > 2:
+            selected = [item for item in selected if item[0] in PREFERRED_BOOKMAKERS][:2]
+        if len(selected) == 1 and len(captured) > 1:
+            for item in captured:
+                if item[0] != selected[0][0]:
+                    selected.append(item)
+                    break
+        if not selected:
             return SportsbookConsensus(home_team, away_team, game_time_utc, None, None, 0, [], "unavailable", "No mainstream Home/Away prices")
+        home_probs = [item[1] for item in selected]
+        away_probs = [item[2] for item in selected]
+        bookmaker_names = [item[0] for item in selected]
         return SportsbookConsensus(
             home_team=home_team,
             away_team=away_team,
