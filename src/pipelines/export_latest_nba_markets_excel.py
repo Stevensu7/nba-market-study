@@ -292,132 +292,133 @@ def _parse_polymarket_event_page(slug: str, html: str) -> dict[str, Any] | None:
 
 
 def fetch_polymarket_rows(schedule_map: dict[tuple[str, str], UpcomingGame]) -> list[dict[str, Any]]:
+    """
+    Fetch NBA markets from Polymarket.
+    
+    注意：这里只获取比赛信息和market代码，实际概率在export时从数据库获取开赛快照。
+    """
     now = utc_now()
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     session = requests.Session()
     session.headers.update({"User-Agent": "nba-market-study/0.1"})
-    html = session.get("https://polymarket.com/sports/nba", timeout=30).text
+    
+    try:
+        html = session.get("https://polymarket.com/sports/nba", timeout=30).text
+    except requests.RequestException as exc:
+        logger.error("Failed to fetch Polymarket NBA page: %s", exc)
+        return []
+        
     cards = _parse_polymarket_cards(html)
     card_by_slug = {card["slug"]: card for card in cards}
+    
+    logger.info("Found %s Polymarket NBA cards", len(cards))
+    
     for slug in _extract_polymarket_game_slugs(html):
         card = card_by_slug.get(slug)
         if card is None:
             try:
                 event_html = session.get(f"https://polymarket.com/event/{slug}", timeout=30).text
             except requests.RequestException as exc:
-                logger.warning("Failed to load Polymarket event page %s: %s", slug, exc)
+                logger.warning("Failed to load Polymarket event %s: %s", slug, exc)
                 continue
             card = _parse_polymarket_event_page(slug, event_html)
-        if card is None:
-            continue
+            if card is None:
+                continue
+                
         team1 = card["team1"]
         team2 = card["team2"]
         matched_game = None
-        home_price = None
-        away_price = None
+        
         for (candidate_home, candidate_away), game in schedule_map.items():
             if _team_matches(team1, candidate_home) and _team_matches(team2, candidate_away):
                 matched_game = game
-                home_price = card["p1"]
-                away_price = card["p2"]
                 break
             if _team_matches(team2, candidate_home) and _team_matches(team1, candidate_away):
                 matched_game = game
-                home_price = card["p2"]
-                away_price = card["p1"]
                 break
+                
         if matched_game is None:
+            logger.debug("No schedule match for Polymarket: %s vs %s", team1, team2)
             continue
+            
         tipoff = parse_datetime(matched_game.game_time_utc)
         if tipoff is None or tipoff <= now:
             continue
+        
+        # 只存储基本信息，概率将从数据库读取
         rows[(matched_game.home_team, matched_game.away_team)] = {
-                "平台": "Polymarket",
-                "比赛时间": matched_game.game_time_utc,
-                "比赛时间(北京时间)": to_beijing_label(matched_game.game_time_utc),
-                "记录日期(北京时间)": beijing_now().strftime("%Y-%m-%d"),
-                "发现时间UTC": utc_now().isoformat(),
-                "主队": matched_game.home_team,
-                "客队": matched_game.away_team,
-                "主队概率": round(home_price, 3) if home_price is not None else None,
-                "客队概率": round(away_price, 3) if away_price is not None else None,
-                "赔率": _price_to_string(matched_game.home_team, matched_game.away_team, home_price, away_price),
-                "预测嬴方": _predicted_winner(matched_game.home_team, matched_game.away_team, home_price, away_price),
-                "实际嬴方（后续补充）": "",
-            }
+            "平台": "Polymarket",
+            "比赛时间": matched_game.game_time_utc,
+            "比赛时间(北京时间)": to_beijing_label(matched_game.game_time_utc),
+            "主队": matched_game.home_team,
+            "客队": matched_game.away_team,
+            # 概率字段初始为空，将从数据库读取
+            "主队概率": None,
+            "客队概率": None,
+            "Polymarket链接": f"https://polymarket.com/event/{slug}",
+        }
+        
+    logger.info("Found %s NBA games on Polymarket", len(rows))
     return sorted(rows.values(), key=lambda item: item["比赛时间"])
 
 
 def fetch_kalshi_rows(schedule_map: dict[tuple[str, str], UpcomingGame]) -> list[dict[str, Any]]:
+    """
+    Fetch NBA markets from Kalshi API.
+    
+    注意：这里只获取比赛信息和市场代码，实际概率在export时从数据库获取开赛快照。
+    """
+    from ..clients.kalshi import KalshiClient
+    
     settings = load_settings()
-    base_url = settings.apis.kalshi_api_base_url.rstrip("/")
+    client = KalshiClient(settings)
     now = utc_now()
     rows: list[dict[str, Any]] = []
 
-    future_games: list[UpcomingGame] = []
-    for game in schedule_map.values():
-        game_dt = parse_datetime(game.game_time_utc)
-        if game_dt is not None and game_dt > now:
-            future_games.append(game)
-    seen_tickers: set[str] = set()
-    for game in sorted(future_games, key=lambda item: item.game_time_utc):
-        event_ticker = _kalshi_event_ticker(game)
-        if event_ticker in seen_tickers:
-            continue
-        seen_tickers.add(event_ticker)
-        try:
-            response = requests.get(f"{base_url}/events/{event_ticker}", timeout=30)
-        except requests.RequestException as exc:
-            logger.warning("Kalshi event fetch failed for %s: %s", event_ticker, exc)
-            continue
-        if response.status_code == 404:
-            continue
-        response.raise_for_status()
-        payload = response.json()
-        event = payload.get("event", {})
+    # Get all NBA events from Kalshi using the series_ticker filter
+    kalshi_events = client.list_nba_events(status="open", limit=100)
+    
+    logger.info("Found %s NBA events from Kalshi", len(kalshi_events))
+
+    for event in kalshi_events:
+        event_ticker = event.get("ticker", "")
         title = str(event.get("title", ""))
+        
+        # Extract matchup from event title
         matchup = _matchup_from_text(title)
         if matchup is None:
-            continue
-        home_team, away_team = matchup
-        game = _find_schedule_game(home_team, away_team, schedule_map)
+            description = str(event.get("description", ""))
+            matchup = _matchup_from_text(description)
+            if matchup is None:
+                logger.debug("Skipping Kalshi event %s - no matchup found", event_ticker)
+                continue
+        
+        away_hint, home_hint = matchup
+        game = _find_schedule_game(home_hint, away_hint, schedule_map)
         if game is None:
+            logger.debug("No schedule match for Kalshi: %s vs %s", home_hint, away_hint)
             continue
+        
         game_time = parse_datetime(game.game_time_utc)
         if game_time is None or game_time <= now:
             continue
 
-        home_price = None
-        away_price = None
-        for market in payload.get("markets", []):
-            team_name = str(market.get("yes_sub_title", ""))
-            yes_bid = safe_float(market.get("yes_bid_dollars"))
-            yes_ask = safe_float(market.get("yes_ask_dollars"))
-            price = midpoint(yes_bid, yes_ask) or safe_float(market.get("last_price_dollars"))
-            if _team_matches(team_name, home_team):
-                home_price = price
-            elif _team_matches(team_name, away_team):
-                away_price = price
-
-        if home_price is None and away_price is None:
-            continue
-
+        # 只存储基本信息，概率在export时从数据库读取
         rows.append(
             {
                 "平台": "Kalshi",
                 "比赛时间": game.game_time_utc,
                 "比赛时间(北京时间)": to_beijing_label(game.game_time_utc),
-                "记录日期(北京时间)": beijing_now().strftime("%Y-%m-%d"),
-                "发现时间UTC": utc_now().isoformat(),
                 "主队": game.home_team,
                 "客队": game.away_team,
-                "主队概率": round(home_price, 3) if home_price is not None else None,
-                "客队概率": round(away_price, 3) if away_price is not None else None,
-                "赔率": _price_to_string(game.home_team, game.away_team, home_price, away_price),
-                "预测嬴方": _predicted_winner(game.home_team, game.away_team, home_price, away_price),
-                "实际嬴方（后续补充）": "",
+                # 概率字段初始为空，将从数据库读取
+                "主队概率": None,
+                "客队概率": None,
+                "Kalshi事件代码": event_ticker,
             }
         )
+    
+    logger.info("Found %s NBA games on Kalshi", len(rows))
     return sorted(rows, key=lambda item: item["比赛时间"])
 
 
@@ -445,32 +446,69 @@ def _normalize_existing_rows(existing: pd.DataFrame, schedule_map: dict[tuple[st
 
 
 def fetch_sportsbook_consensus(schedule_map: dict[tuple[str, str], UpcomingGame]) -> dict[tuple[str, str], SportsbookConsensus]:
+    """
+    Fetch sportsbook consensus odds for all games in the schedule.
+    
+    Works for both past and future games. The API should return odds for 
+    scheduled games as well.
+    """
     settings = load_settings()
     client = APIBasketballClient(settings)
     if not client.enabled:
         return {}
+        
+    # Get unique dates from schedule and include future dates
+    now = utc_now()
     dates = sorted({game.game_time_utc[:10] for game in schedule_map.values() if game.game_time_utc})
+    
+    # Also fetch for next 7 days to ensure we have future games
+    future_dates = set()
+    for i in range(8):  # Today + 7 days ahead
+        future_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
+        future_dates.add(future_date)
+    
+    all_dates = sorted(set(dates) | future_dates)
+    logger.info("Fetching sportsbook consensus for dates: %s", all_dates)
+    
     consensus_map: dict[tuple[str, str], SportsbookConsensus] = {}
-    for date_str in dates:
+    
+    for date_str in all_dates:
         try:
             games = client.get_games_by_date(date_str)
+            logger.info("API-Basketball returned %s games for date %s", len(games), date_str)
         except Exception as exc:  # noqa: BLE001
             logger.warning("API-Basketball games lookup failed for %s: %s", date_str, exc)
             continue
+            
         for game_payload in games:
             home_team = normalize_team_name(str(game_payload.get("teams", {}).get("home", {}).get("name", "")))
             away_team = normalize_team_name(str(game_payload.get("teams", {}).get("away", {}).get("name", "")))
+            
+            # Match with schedule
             matched = _find_schedule_game(home_team, away_team, schedule_map)
             if matched is None:
+                logger.debug("No schedule match for API-Basketball game: %s vs %s", home_team, away_team)
                 continue
+                
             try:
                 consensus = client.build_consensus_for_game(game_payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("API-Basketball odds lookup failed for %s vs %s: %s", home_team, away_team, exc)
                 continue
+                
             consensus.home_team = matched.home_team
             consensus.away_team = matched.away_team
+            
+            # Store with timestamp
             consensus_map[(matched.home_team, matched.away_team)] = consensus
+            logger.info(
+                "Sportsbook consensus for %s vs %s: home=%.3f, away=%.3f, books=%s", 
+                matched.home_team, matched.away_team,
+                consensus.home_probability or 0, consensus.away_probability or 0,
+                consensus.bookmaker_names
+            )
+            
+    logger.info("Fetched sportsbook consensus for %s games", len(consensus_map))
     return consensus_map
 
 
@@ -494,31 +532,101 @@ def _merge_rows(existing: pd.DataFrame, fresh_rows: list[dict[str, Any]]) -> pd.
     return combined
 
 
+def _get_start_snapshot_probabilities(
+    platform: str, 
+    home_team: str, 
+    away_team: str, 
+    game_time_utc: str,
+    db_path: Path | None = None
+) -> tuple[float | None, float | None, str | None]:
+    """
+    从数据库获取开赛时的概率快照。
+    
+    返回: (主队概率, 客队概率, 快照时间UTC)
+    如果没有开赛快照，返回None
+    """
+    from ..db import Database
+    from ..config import load_settings
+    
+    settings = load_settings()
+    db = Database(db_path or settings.paths.database)
+    
+    try:
+        # 查找这场比赛
+        games = db.list_games(
+            where_sql="platform = ? AND home_team = ? AND away_team = ? AND tipoff_time_utc LIKE ?",
+            params=(platform, home_team, away_team, f"{game_time_utc[:10]}%")
+        )
+        
+        if not games:
+            return None, None, None
+            
+        game = games[0]
+        game_id = game["id"]
+        
+        # 查找所有快照，按时间排序
+        snapshots = db.list_snapshots_for_game(game_id)
+        
+        if not snapshots:
+            return None, None, None
+        
+        # 找到最接近开赛时间的快照（minutes_to_tipoff最接近0）
+        closest_snapshot = None
+        closest_minutes = float('inf')
+        
+        for snap in snapshots:
+            minutes = snap.get("minutes_to_tipoff")
+            if minutes is not None:
+                # 寻找最接近0的（开赛时或最接近开赛）
+                if abs(minutes) < abs(closest_minutes):
+                    closest_minutes = minutes
+                    closest_snapshot = snap
+        
+        if closest_snapshot is None:
+            return None, None, None
+        
+        home_prob = closest_snapshot.get("home_mid_price")
+        away_prob = closest_snapshot.get("away_mid_price")
+        snapshot_time = closest_snapshot.get("snapshot_time_utc")
+        
+        return home_prob, away_prob, snapshot_time
+        
+    except Exception as exc:
+        logger.warning("Failed to get start snapshot for %s %s vs %s: %s", 
+                      platform, home_team, away_team, exc)
+        return None, None, None
+
+
 def _apply_results_and_pnl(
     df: pd.DataFrame,
     schedule_map: dict[tuple[str, str], UpcomingGame],
     sportsbook_map: dict[tuple[str, str], SportsbookConsensus],
 ) -> pd.DataFrame:
+    """
+    应用比赛结果、PnL计算，并填充开赛时的概率。
+    
+    核心逻辑：
+    1. 从数据库读取每个平台的开赛概率快照
+    2. 从sportsbook_map读取开赛时的博彩共识
+    3. 使用开赛时的概率进行价差分析和收益计算
+    """
     if df.empty:
         return df
     work = df.copy()
+    
+    # 定义所有列的默认值
     defaults = {
         "比赛时间(北京时间)": "",
         "记录日期(北京时间)": beijing_now().strftime("%Y-%m-%d"),
-        "发现时间UTC": "",
         "状态": "scheduled",
         "开赛快照时间UTC": "",
         "开赛主队概率": pd.NA,
         "开赛客队概率": pd.NA,
         "开赛主流博彩主队概率": pd.NA,
         "开赛主流博彩客队概率": pd.NA,
-        "主流博彩主队概率": pd.NA,
-        "主流博彩客队概率": pd.NA,
-        "主流博彩样本数": pd.NA,
-        "主流博彩来源": "",
-        "主流博彩状态": "",
         "主队概率": pd.NA,
         "客队概率": pd.NA,
+        "赔率": "",
         "预测嬴方": "",
         "实际嬴方（后续补充）": "",
         "是否命中": "",
@@ -530,97 +638,106 @@ def _apply_results_and_pnl(
         "相对主流博彩客队价差": pd.NA,
         "10U收益": pd.NA,
         "累计收益": pd.NA,
+        "Polymarket链接": "",
+        "Kalshi事件代码": "",
     }
+    
     for column, default in defaults.items():
         if column not in work.columns:
             work[column] = default
+    
+    # 设置字符串列类型
     for column in [
-        "比赛时间(北京时间)",
-        "记录日期(北京时间)",
-        "发现时间UTC",
-        "状态",
-        "开赛快照时间UTC",
-        "开赛主流博彩主队概率",
-        "开赛主流博彩客队概率",
-        "主流博彩来源",
-        "主流博彩状态",
-        "预测嬴方",
-        "实际嬴方（后续补充）",
-        "是否命中",
-        "下注方向",
-        "赔率",
-        "价差预警",
+        "比赛时间(北京时间)", "记录日期(北京时间)", "状态", "开赛快照时间UTC",
+        "预测嬴方", "实际嬴方（后续补充）", "是否命中", "下注方向", "赔率",
+        "价差预警", "Polymarket链接", "Kalshi事件代码",
     ]:
         if column in work.columns:
             work[column] = work[column].astype("object")
 
+    # 处理每一行
     for idx, row in work.iterrows():
-        game = _find_schedule_game(_clean_text(row.get("主队")), _clean_text(row.get("客队")), schedule_map)
+        platform = _clean_text(row.get("平台"))
+        home_team = _clean_text(row.get("主队"))
+        away_team = _clean_text(row.get("客队"))
+        game_time = _clean_text(row.get("比赛时间"))
+        
+        game = _find_schedule_game(home_team, away_team, schedule_map)
+        
+        # 填充比赛时间（北京时间）
         if game:
             work.at[idx, "比赛时间(北京时间)"] = to_beijing_label(game.game_time_utc)
-        game_dt = parse_datetime(game.game_time_utc) if game else None
+        
+        # 确定比赛状态
+        game_dt = parse_datetime(game_time)
         if game and game.completed and game.winner_team:
-            work.at[idx, "实际嬴方（后续补充）"] = game.winner_team
             work.at[idx, "状态"] = "final"
+            work.at[idx, "实际嬴方（后续补充）"] = game.winner_team
         elif game and game_dt is not None and game_dt <= utc_now():
             work.at[idx, "状态"] = "in_play"
         else:
             work.at[idx, "状态"] = "scheduled"
-        if not _clean_text(row.get("发现时间UTC")):
-            work.at[idx, "发现时间UTC"] = utc_now().isoformat()
-        work.at[idx, "记录日期(北京时间)"] = _clean_text(row.get("记录日期(北京时间)")) or beijing_now().strftime("%Y-%m-%d")
-        if game:
-            consensus = sportsbook_map.get((game.home_team, game.away_team))
-            if consensus:
-                work.at[idx, "主流博彩主队概率"] = round(consensus.home_probability, 4) if consensus.home_probability is not None else pd.NA
-                work.at[idx, "主流博彩客队概率"] = round(consensus.away_probability, 4) if consensus.away_probability is not None else pd.NA
-                work.at[idx, "主流博彩样本数"] = consensus.bookmaker_count
-                work.at[idx, "主流博彩来源"] = ", ".join(consensus.bookmaker_names)
-                work.at[idx, "主流博彩状态"] = consensus.status if not consensus.message else f"{consensus.status}: {consensus.message}"
+        
+        # 设置记录日期
+        work.at[idx, "记录日期(北京时间)"] = beijing_now().strftime("%Y-%m-%d")
+        
+        if not game:
+            continue
+        
+        # ========== 获取开赛时的Polymarket/Kalshi概率（从数据库）==========
+        start_home_prob = None
+        start_away_prob = None
+        snapshot_time = None
+        
+        if platform in ["Polymarket", "Kalshi"]:
+            start_home_prob, start_away_prob, snapshot_time = _get_start_snapshot_probabilities(
+                platform, game.home_team, game.away_team, game.game_time_utc
+            )
+            
+            if start_home_prob is not None and start_away_prob is not None:
+                work.at[idx, "开赛主队概率"] = round(start_home_prob, 4)
+                work.at[idx, "开赛客队概率"] = round(start_away_prob, 4)
+                work.at[idx, "开赛快照时间UTC"] = snapshot_time or ""
+                work.at[idx, "主队概率"] = round(start_home_prob, 4)
+                work.at[idx, "客队概率"] = round(start_away_prob, 4)
+                work.at[idx, "赔率"] = _price_to_string(
+                    game.home_team, game.away_team, start_home_prob, start_away_prob
+                )
+                work.at[idx, "预测嬴方"] = _predicted_winner(
+                    game.home_team, game.away_team, start_home_prob, start_away_prob
+                )
+        
+        # ========== 获取开赛时的Sportsbook共识概率 ==========
+        start_sportsbook_home = None
+        start_sportsbook_away = None
+        
+        consensus = sportsbook_map.get((game.home_team, game.away_team))
+        if consensus:
+            # 使用sportsbook的开赛概率
+            start_sportsbook_home = consensus.home_probability
+            start_sportsbook_away = consensus.away_probability
+            
+            if start_sportsbook_home is not None and start_sportsbook_away is not None:
+                work.at[idx, "开赛主流博彩主队概率"] = round(start_sportsbook_home, 4)
+                work.at[idx, "开赛主流博彩客队概率"] = round(start_sportsbook_away, 4)
+        
+        # ========== 计算价差 ==========
+        if start_home_prob is not None and start_sportsbook_home is not None:
+            work.at[idx, "相对主流博彩主队价差"] = round(start_home_prob - start_sportsbook_home, 4)
+        if start_away_prob is not None and start_sportsbook_away is not None:
+            work.at[idx, "相对主流博彩客队价差"] = round(start_away_prob - start_sportsbook_away, 4)
+        
+        # ========== 计算收益 ==========
         prediction = _clean_text(work.at[idx, "预测嬴方"])
         actual = _clean_text(work.at[idx, "实际嬴方（后续补充）"])
         work.at[idx, "下注方向"] = prediction
-        home_prob = safe_float(work.at[idx, "主队概率"])
-        away_prob = safe_float(work.at[idx, "客队概率"])
-        if home_prob is None or away_prob is None:
-            parsed_home_prob, parsed_away_prob = _parse_probs_from_odds_text(
-                _clean_text(work.at[idx, "赔率"]),
-                _clean_text(row.get("主队")),
-                _clean_text(row.get("客队")),
-            )
-            home_prob = home_prob if home_prob is not None else parsed_home_prob
-            away_prob = away_prob if away_prob is not None else parsed_away_prob
-            work.at[idx, "主队概率"] = home_prob
-            work.at[idx, "客队概率"] = away_prob
-        sportsbook_home = safe_float(work.at[idx, "主流博彩主队概率"])
-        sportsbook_away = safe_float(work.at[idx, "主流博彩客队概率"])
-        game_time = parse_datetime(_clean_text(row.get("比赛时间")))
-        start_home_prob = safe_float(work.at[idx, "开赛主队概率"])
-        start_away_prob = safe_float(work.at[idx, "开赛客队概率"])
-        start_sportsbook_home = safe_float(work.at[idx, "开赛主流博彩主队概率"])
-        start_sportsbook_away = safe_float(work.at[idx, "开赛主流博彩客队概率"])
-        should_freeze_start = bool(
-            game is not None
-            and game_time is not None
-            and game_time <= utc_now()
-            and not game.completed
-            and (start_home_prob is None and start_away_prob is None)
-        )
-        if should_freeze_start:
-            work.at[idx, "开赛快照时间UTC"] = utc_now().isoformat()
-            work.at[idx, "开赛主队概率"] = home_prob
-            work.at[idx, "开赛客队概率"] = away_prob
-            work.at[idx, "开赛主流博彩主队概率"] = sportsbook_home
-            work.at[idx, "开赛主流博彩客队概率"] = sportsbook_away
-            start_home_prob = home_prob
-            start_away_prob = away_prob
-            start_sportsbook_home = sportsbook_home
-            start_sportsbook_away = sportsbook_away
+        
         bet_prob = None
-        if prediction and prediction == _clean_text(row.get("主队")):
+        if prediction and prediction == home_team:
             bet_prob = start_home_prob
-        elif prediction and prediction == _clean_text(row.get("客队")):
+        elif prediction and prediction == away_team:
             bet_prob = start_away_prob
+        
         if prediction and actual and bet_prob is not None and 0 < bet_prob < 1:
             hit = prediction == actual
             pnl = 10.0 * ((1 - bet_prob) / bet_prob) if hit else -10.0
@@ -629,11 +746,8 @@ def _apply_results_and_pnl(
         else:
             work.at[idx, "是否命中"] = ""
             work.at[idx, "10U收益"] = pd.NA
-        if home_prob is not None and sportsbook_home is not None:
-            work.at[idx, "相对主流博彩主队价差"] = round(home_prob - sportsbook_home, 4)
-        if away_prob is not None and sportsbook_away is not None:
-            work.at[idx, "相对主流博彩客队价差"] = round(away_prob - sportsbook_away, 4)
 
+    # ========== 计算跨市场价差 ==========
     group_cols = ["比赛时间", "主队", "客队"]
     for _, indices in work.groupby(group_cols, dropna=False).groups.items():
         idx_list = list(indices)
@@ -643,10 +757,10 @@ def _apply_results_and_pnl(
         if set(subset["平台"].tolist()) >= {"Polymarket", "Kalshi"}:
             poly = subset[subset["平台"] == "Polymarket"].iloc[0]
             kal = subset[subset["平台"] == "Kalshi"].iloc[0]
-            poly_home = safe_float(poly.get("开赛主队概率")) or safe_float(poly.get("主队概率"))
-            kal_home = safe_float(kal.get("开赛主队概率")) or safe_float(kal.get("主队概率"))
-            poly_away = safe_float(poly.get("开赛客队概率")) or safe_float(poly.get("客队概率"))
-            kal_away = safe_float(kal.get("开赛客队概率")) or safe_float(kal.get("客队概率"))
+            poly_home = safe_float(poly.get("开赛主队概率"))
+            kal_home = safe_float(kal.get("开赛主队概率"))
+            poly_away = safe_float(poly.get("开赛客队概率"))
+            kal_away = safe_float(kal.get("开赛客队概率"))
             home_gap = abs(poly_home - kal_home) if poly_home is not None and kal_home is not None else None
             away_gap = abs(poly_away - kal_away) if poly_away is not None and kal_away is not None else None
             warn = (home_gap is not None and home_gap > 0.05) or (away_gap is not None and away_gap > 0.05)
@@ -655,6 +769,7 @@ def _apply_results_and_pnl(
                 work.at[i, "跨市场客队价差"] = round(away_gap, 4) if away_gap is not None else pd.NA
                 work.at[i, "价差预警"] = "YES" if warn else ""
 
+    # 排序并计算累计收益
     work = work.sort_values(by=["比赛时间", "平台", "主队", "客队"]).reset_index(drop=True)
     cumulative = 0.0
     cumulative_values: list[float] = []
@@ -666,6 +781,7 @@ def _apply_results_and_pnl(
         else:
             cumulative_values.append(round(cumulative, 4))
     work["累计收益"] = cumulative_values
+    
     return work
 
 
@@ -1151,80 +1267,51 @@ def export_excel(output_path: Path) -> Path:
     markets_df = _apply_results_and_pnl(merged, schedule_map, sportsbook_map)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        # 定义所有列（专注于开赛时概率，移除发现时间等字段）
+        column_definitions = {
+            "平台": pd.Series(dtype="string"),
+            "比赛时间": pd.Series(dtype="string"),
+            "比赛时间(北京时间)": pd.Series(dtype="string"),
+            "记录日期(北京时间)": pd.Series(dtype="string"),
+            "状态": pd.Series(dtype="string"),
+            # 开赛快照（核心字段）
+            "开赛快照时间UTC": pd.Series(dtype="string"),
+            "开赛主队概率": pd.Series(dtype="float"),
+            "开赛客队概率": pd.Series(dtype="float"),
+            "开赛主流博彩主队概率": pd.Series(dtype="float"),
+            "开赛主流博彩客队概率": pd.Series(dtype="float"),
+            # 队伍信息
+            "主队": pd.Series(dtype="string"),
+            "客队": pd.Series(dtype="string"),
+            # 当前/最新概率（显示用）
+            "主队概率": pd.Series(dtype="float"),
+            "客队概率": pd.Series(dtype="float"),
+            "赔率": pd.Series(dtype="string"),
+            # 预测和结果
+            "预测嬴方": pd.Series(dtype="string"),
+            "实际嬴方（后续补充）": pd.Series(dtype="string"),
+            # 价差分析
+            "跨市场主队价差": pd.Series(dtype="float"),
+            "跨市场客队价差": pd.Series(dtype="float"),
+            "价差预警": pd.Series(dtype="string"),
+            "相对主流博彩主队价差": pd.Series(dtype="float"),
+            "相对主流博彩客队价差": pd.Series(dtype="float"),
+            # 收益计算
+            "是否命中": pd.Series(dtype="string"),
+            "下注方向": pd.Series(dtype="string"),
+            "10U收益": pd.Series(dtype="float"),
+            "累计收益": pd.Series(dtype="float"),
+            # 平台特定字段
+            "Polymarket链接": pd.Series(dtype="string"),
+            "Kalshi事件代码": pd.Series(dtype="string"),
+        }
+        
         if markets_df.empty:
-            final_df = pd.DataFrame(
-                {
-                    "平台": pd.Series(dtype="string"),
-                    "比赛时间": pd.Series(dtype="string"),
-                    "比赛时间(北京时间)": pd.Series(dtype="string"),
-                    "记录日期(北京时间)": pd.Series(dtype="string"),
-                    "发现时间UTC": pd.Series(dtype="string"),
-                    "状态": pd.Series(dtype="string"),
-                    "开赛快照时间UTC": pd.Series(dtype="string"),
-                    "开赛主队概率": pd.Series(dtype="float"),
-                    "开赛客队概率": pd.Series(dtype="float"),
-                    "开赛主流博彩主队概率": pd.Series(dtype="float"),
-                    "开赛主流博彩客队概率": pd.Series(dtype="float"),
-                    "主流博彩主队概率": pd.Series(dtype="float"),
-                    "主流博彩客队概率": pd.Series(dtype="float"),
-                    "主流博彩样本数": pd.Series(dtype="float"),
-                    "主流博彩来源": pd.Series(dtype="string"),
-                    "主流博彩状态": pd.Series(dtype="string"),
-                    "主队": pd.Series(dtype="string"),
-                    "客队": pd.Series(dtype="string"),
-                    "主队概率": pd.Series(dtype="float"),
-                    "客队概率": pd.Series(dtype="float"),
-                    "赔率": pd.Series(dtype="string"),
-                    "预测嬴方": pd.Series(dtype="string"),
-                    "实际嬴方（后续补充）": pd.Series(dtype="string"),
-                    "跨市场主队价差": pd.Series(dtype="float"),
-                    "跨市场客队价差": pd.Series(dtype="float"),
-                    "价差预警": pd.Series(dtype="string"),
-                    "相对主流博彩主队价差": pd.Series(dtype="float"),
-                    "相对主流博彩客队价差": pd.Series(dtype="float"),
-                    "是否命中": pd.Series(dtype="string"),
-                    "下注方向": pd.Series(dtype="string"),
-                    "10U收益": pd.Series(dtype="float"),
-                    "累计收益": pd.Series(dtype="float"),
-                }
-            )
+            final_df = pd.DataFrame(column_definitions)
         else:
-            final_df = markets_df[
-                [
-                    "平台",
-                    "比赛时间",
-                    "比赛时间(北京时间)",
-                    "记录日期(北京时间)",
-                    "发现时间UTC",
-                    "状态",
-                    "开赛快照时间UTC",
-                    "开赛主队概率",
-                    "开赛客队概率",
-                    "开赛主流博彩主队概率",
-                    "开赛主流博彩客队概率",
-                    "主流博彩主队概率",
-                    "主流博彩客队概率",
-                    "主流博彩样本数",
-                    "主流博彩来源",
-                    "主流博彩状态",
-                    "主队",
-                    "客队",
-                    "主队概率",
-                    "客队概率",
-                    "赔率",
-                    "预测嬴方",
-                    "实际嬴方（后续补充）",
-                    "跨市场主队价差",
-                    "跨市场客队价差",
-                    "价差预警",
-                    "相对主流博彩主队价差",
-                    "相对主流博彩客队价差",
-                    "是否命中",
-                    "下注方向",
-                    "10U收益",
-                    "累计收益",
-                ]
-            ]
+            # Select only columns that exist in the dataframe
+            available_cols = [col for col in column_definitions.keys() if col in markets_df.columns]
+            final_df = markets_df[available_cols]
         final_df = pd.DataFrame(final_df)
         final_df.to_excel(writer, sheet_name="backtest", index=False)
         settled_mask = final_df["实际嬴方（后续补充）"].astype("string").fillna("") != ""

@@ -359,3 +359,13 @@ class Database:
         """
         with self.connect() as conn:
             return pd.read_sql_query(query, conn, params=[platform, snapshot_label])
+
+    def list_snapshots_for_game(self, game_id: int) -> list[sqlite3.Row]:
+        """Get all price snapshots for a specific game."""
+        query = """
+        SELECT * FROM price_snapshots 
+        WHERE game_id = ? 
+        ORDER BY snapshot_time_utc
+        """
+        with self.connect() as conn:
+            return list(conn.execute(query, (game_id,)).fetchall())
