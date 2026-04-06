@@ -1205,11 +1205,16 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
       <div class=\"card\"><div class=\"label\">Total PnL</div><div class=\"value {'good' if summary['total_pnl'] >= 0 else 'bad'}\">{summary['total_pnl']:.4f}U</div></div>
       <div class=\"card\"><div class=\"label\">ROI</div><div class=\"value {'good' if summary['roi'] >= 0 else 'bad'}\">{summary['roi']:.2%}</div></div>
     </div>
-    <div class='split'>
-      <div class=\"card\">
-        <div class=\"label\">Cumulative PnL</div>
-        {chart_html}
-      </div>
+<div class='split'>
+<div class="card">
+<div class="label">Cumulative PnL</div>
+{chart_html}
+</div>
+<div class="card" style="max-height: 400px; overflow-y: auto;">
+<div class="label">Divergence Warnings (&gt; 0.05)</div>
+{warning_html}
+</div>
+</div>
       <div class=\"card\">
         <div class=\"label\">Divergence Warnings (&gt; 0.05)</div>
         {warning_html}
@@ -1233,13 +1238,22 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
       <button class='tab-btn active' data-target='all-panel'>All Games</button>
       <button class='tab-btn' data-target='settled-panel'>Settled Only</button>
     </div>
-    <div id='all-panel' class='panel active'>
-      <div class=\"table-wrap\">
-        <table>
-          <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
-          <tbody id='all-body'>{all_rows_html}</tbody>
-        </table>
-      </div>
+<div id='all-panel' class='panel active'>
+<div class="table-wrap" style="max-height: 600px; overflow-y: auto;">
+<table>
+<thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>开赛赔率</th><th>开赛博彩共识</th><th>开赛价差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+<tbody id='all-body'>{all_rows_html}</tbody>
+</table>
+</div>
+</div>
+<div id='settled-panel' class='panel'>
+<div class="table-wrap" style="max-height: 600px; overflow-y: auto;">
+<table>
+<thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>开赛赔率</th><th>开赛博彩共识</th><th>开赛价差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
+<tbody id='settled-body'>{settled_rows_html}</tbody>
+</table>
+</div>
+</div>
     </div>
     <div id='settled-panel' class='panel'>
       <div class=\"table-wrap\">
