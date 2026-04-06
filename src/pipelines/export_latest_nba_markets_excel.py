@@ -1026,6 +1026,7 @@ def _build_accuracy_bin_table(df: pd.DataFrame) -> str:
 
 
 def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> str:
+    """Generate HTML table rows showing start-time probabilities."""
     fragments: list[str] = []
     for row in rows:
         actual = _clean_text(row.get("实际嬴方（后续补充）"))
@@ -1035,22 +1036,37 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
         result = _clean_text(row.get("是否命中"))
         status = _clean_text(row.get("状态"))
         warning = _clean_text(row.get("价差预警"))
-        sportsbook_home = _clean_text(row.get("主流博彩主队概率"))
-        sportsbook_away = _clean_text(row.get("主流博彩客队概率"))
-        sportsbook_diff_home = _clean_text(row.get("相对主流博彩主队价差"))
-        sportsbook_diff_away = _clean_text(row.get("相对主流博彩客队价差"))
+        
+        # 使用开赛时的概率（核心）
+        start_home_prob = _clean_text(row.get("开赛主队概率"))
+        start_away_prob = _clean_text(row.get("开赛客队概率"))
+        start_sportsbook_home = _clean_text(row.get("开赛主流博彩主队概率"))
+        start_sportsbook_away = _clean_text(row.get("开赛主流博彩客队概率"))
+        
+        # 价差（基于开赛概率）
+        diff_home = _clean_text(row.get("相对主流博彩主队价差"))
+        diff_away = _clean_text(row.get("相对主流博彩客队价差"))
+        
         sportsbook_sources = _clean_text(row.get("主流博彩来源"))
+        snapshot_time = _clean_text(row.get("开赛快照时间UTC"))
+        
         tag_class = "win" if result == "win" else "loss" if result == "loss" else "muted"
         row_class = "warning-row" if warning == "YES" else ""
+        
+        # 构建赔率显示（基于开赛概率）
+        odds_display = f"{start_home_prob} | {start_away_prob}" if start_home_prob and start_away_prob else "N/A"
+        sportsbook_display = f"{start_sportsbook_home} | {start_sportsbook_away}" if start_sportsbook_home and start_sportsbook_away else "N/A"
+        diff_display = f"{diff_home} | {diff_away}" if diff_home and diff_away else "N/A"
+        
         fragments.append(
             f"<tr class='{row_class}' data-platform='{platform}' data-settled='{str(bool(actual)).lower()}'>"
             f"<td>{platform}</td>"
             f"<td>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</td>"
             f"<td>{_clean_text(row.get('主队'))}</td>"
             f"<td>{_clean_text(row.get('客队'))}</td>"
-            f"<td>{_clean_text(row.get('赔率'))}</td>"
-            f"<td>{sportsbook_home} | {sportsbook_away}</td>"
-            f"<td>{sportsbook_diff_home} | {sportsbook_diff_away}</td>"
+            f"<td title='开赛概率'>{odds_display}</td>"  # 显示开赛时概率
+            f"<td title='主流博彩共识(开赛)'>{sportsbook_display}</td>"
+            f"<td title='价差(平台-博彩)'>{diff_display}</td>"
             f"<td>{sportsbook_sources}</td>"
             f"<td>{_clean_text(row.get('预测嬴方'))}</td>"
             f"<td>{actual}</td>"
