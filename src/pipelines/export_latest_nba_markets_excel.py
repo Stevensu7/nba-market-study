@@ -183,36 +183,77 @@ def _clean_text(value: Any) -> str:
 
 
 def _build_schedule_map() -> dict[tuple[str, str], UpcomingGame]:
+    """Build schedule map from ESPN scoreboard API."""
     scoreboard_url = load_settings().apis.espn_scoreboard_base_url
     session = requests.Session()
     session.headers.update({"User-Agent": "nba-market-study/0.1"})
     now = utc_now()
     games: dict[tuple[str, str], UpcomingGame] = {}
+    
     for delta in range(-1, 8):
         date_str = (now + timedelta(days=delta)).strftime("%Y%m%d")
-        response = session.get(scoreboard_url, params={"dates": date_str}, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = session.get(scoreboard_url, params={"dates": date_str}, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.warning("Failed to fetch ESPN scoreboard for %s: %s", date_str, exc)
+            continue
+            
         for event in payload.get("events", []):
             event_time = parse_datetime(event.get("date"))
             if event_time is None:
                 continue
+                
             competition = (event.get("competitions") or [{}])[0]
             competitors = competition.get("competitors") or []
             home = next((item for item in competitors if item.get("homeAway") == "home"), None)
             away = next((item for item in competitors if item.get("homeAway") == "away"), None)
+            
             if not home or not away:
                 continue
+                
             home_team = normalize_team_name(home.get("team", {}).get("displayName", ""))
             away_team = normalize_team_name(away.get("team", {}).get("displayName", ""))
             home_abbr = str(home.get("team", {}).get("abbreviation", ""))
             away_abbr = str(away.get("team", {}).get("abbreviation", ""))
+            
+            # 尝试多种方式获取比分
             home_score = safe_float(home.get("score"))
             away_score = safe_float(away.get("score"))
-            completed = bool(competition.get("status", {}).get("type", {}).get("completed"))
+            
+            # 如果直接获取不到，尝试从linescores获取总分
+            if home_score is None:
+                linescores = home.get("linescores", [])
+                if linescores:
+                    home_score = sum(safe_float(ls.get("value")) for ls in linescores if safe_float(ls.get("value")) is not None) or None
+                    
+            if away_score is None:
+                linescores = away.get("linescores", [])
+                if linescores:
+                    away_score = sum(safe_float(ls.get("value")) for ls in linescores if safe_float(ls.get("value")) is not None) or None
+            
+            status_obj = competition.get("status", {}) or {}
+            status_type = status_obj.get("type", {}) or {}
+            completed = bool(status_type.get("completed"))
+            status_name = str(status_type.get("name", "")).lower()
+            
+            # 如果状态显示结束但比分仍然为None，记录警告
             winner_team = None
-            if completed and home_score is not None and away_score is not None and home_score != away_score:
-                winner_team = home_team if home_score > away_score else away_team
+            if completed:
+                if home_score is not None and away_score is not None:
+                    if home_score > away_score:
+                        winner_team = home_team
+                    elif away_score > home_score:
+                        winner_team = away_team
+                    else:
+                        logger.debug("Game %s vs %s ended in tie", home_team, away_team)
+                else:
+                    logger.warning(
+                        "Game %s vs %s completed but scores not available: home=%s, away=%s, status=%s",
+                        home_team, away_team, home_score, away_score, status_name
+                    )
+            
             games[(home_team, away_team)] = UpcomingGame(
                 game_time_utc=event_time.isoformat(),
                 home_team=home_team,
@@ -222,6 +263,8 @@ def _build_schedule_map() -> dict[tuple[str, str], UpcomingGame]:
                 winner_team=winner_team,
                 completed=completed,
             )
+            
+    logger.info("Built schedule map with %s games from ESPN", len(games))
     return games
 
 
@@ -1215,12 +1258,8 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
 {warning_html}
 </div>
 </div>
-      <div class=\"card\">
-        <div class=\"label\">Divergence Warnings (&gt; 0.05)</div>
-        {warning_html}
-      </div>
-    </div>
-    <div class="platform-grid">
+</div>
+<div class="platform-grid">
       {platform_accuracy_cards}
     </div>
     <div class="comparison-grid">
@@ -1261,10 +1300,10 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
           <thead><tr><th>平台</th><th>比赛时间</th><th>主队</th><th>客队</th><th>赔率</th><th>主流博彩共识</th><th>平台-主流差</th><th>Bookmakers</th><th>预测嬴方</th><th>实际嬴方</th><th>状态</th><th>价差预警</th><th>是否命中</th><th>10U收益</th><th>累计收益</th></tr></thead>
           <tbody id='settled-body'>{settled_rows_html}</tbody>
         </table>
-      </div>
-    </div>
-  </div>
-  <script>
+</div>
+</div>
+</div>
+<script>
     const filterButtons = Array.from(document.querySelectorAll('.filter-btn'));
     const tabButtons = Array.from(document.querySelectorAll('.tab-btn'));
     function applyPlatformFilter(platform) {{
