@@ -39,6 +39,8 @@ def main() -> None:
     elif args.command == "resolve":
         run_resolve()
     elif args.command == "refresh":
+        run_collect()
+        run_resolve()
         export_excel(settings.root_dir / "backtest.xlsx")
     elif args.command == "track-day":
         run_daily_tracker(output_path=settings.root_dir / "backtest.xlsx", poll_seconds=args.poll_seconds)
