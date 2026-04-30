@@ -369,3 +369,18 @@ class Database:
         """
         with self.connect() as conn:
             return list(conn.execute(query, (game_id,)).fetchall())
+
+    def get_game_result(self, platform: str, home_team: str, away_team: str, game_date_prefix: str) -> sqlite3.Row | None:
+        query = """
+        SELECT r.*, g.status AS game_status, g.tipoff_time_utc
+        FROM results r
+        JOIN games g ON g.id = r.game_id
+        WHERE g.platform = ?
+          AND g.home_team = ?
+          AND g.away_team = ?
+          AND g.tipoff_time_utc LIKE ?
+        ORDER BY g.tipoff_time_utc
+        LIMIT 1
+        """
+        with self.connect() as conn:
+            return conn.execute(query, (platform, home_team, away_team, f"{game_date_prefix}%")).fetchone()

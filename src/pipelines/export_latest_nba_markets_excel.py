@@ -640,6 +640,20 @@ def _get_start_snapshot_probabilities(
         return None, None, None
 
 
+def _load_db_result(platform: str, home_team: str, away_team: str, game_time_utc: str) -> tuple[str | None, str | None]:
+    from ..config import load_settings
+    from ..db import Database
+
+    settings = load_settings()
+    db = Database(settings.paths.database)
+    if not game_time_utc:
+        return None, None
+    row = db.get_game_result(platform.lower(), home_team, away_team, game_time_utc[:10])
+    if row is None:
+        return None, None
+    return row["winner_team"], row["resolved_at_utc"]
+
+
 def _apply_results_and_pnl(
     df: pd.DataFrame,
     schedule_map: dict[tuple[str, str], UpcomingGame],
@@ -711,12 +725,20 @@ def _apply_results_and_pnl(
         if game:
             work.at[idx, "比赛时间(北京时间)"] = to_beijing_label(game.game_time_utc)
         
-        # 确定比赛状态
+        # 确定比赛状态, 优先使用数据库已解析结果, 再回退到 ESPN schedule_map
         game_dt = parse_datetime(game_time)
-        if game and game.completed and game.winner_team:
+        db_winner = None
+        db_resolved_at = None
+        if platform in ["Polymarket", "Kalshi"] and game_time:
+            db_winner, db_resolved_at = _load_db_result(platform, home_team, away_team, game_time)
+
+        if db_winner:
+            work.at[idx, "状态"] = "final"
+            work.at[idx, "实际嬴方（后续补充）"] = db_winner
+        elif game and game.completed and game.winner_team:
             work.at[idx, "状态"] = "final"
             work.at[idx, "实际嬴方（后续补充）"] = game.winner_team
-        elif game and game_dt is not None and game_dt <= utc_now():
+        elif game_dt is not None and game_dt <= utc_now():
             work.at[idx, "状态"] = "in_play"
         else:
             work.at[idx, "状态"] = "scheduled"
@@ -1101,8 +1123,9 @@ def _table_rows_html(rows: list[dict[str, Any]], settled_only: bool = False) -> 
         sportsbook_display = f"{start_sportsbook_home} | {start_sportsbook_away}" if start_sportsbook_home and start_sportsbook_away else "N/A"
         diff_display = f"{diff_home} | {diff_away}" if diff_home and diff_away else "N/A"
         
+        is_settled = bool(actual) and result in {"win", "loss"}
         fragments.append(
-            f"<tr class='{row_class}' data-platform='{platform}' data-settled='{str(bool(actual)).lower()}'>"
+            f"<tr class='{row_class}' data-platform='{platform}' data-settled='{str(is_settled).lower()}'>"
             f"<td>{platform}</td>"
             f"<td>{_clean_text(row.get('比赛时间(北京时间)') or row.get('比赛时间'))}</td>"
             f"<td>{_clean_text(row.get('主队'))}</td>"
