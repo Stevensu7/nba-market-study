@@ -9,6 +9,7 @@ from .pipelines.run_daily_tracker import run as run_daily_tracker
 from .pipelines.resolve_game_results import run as run_resolve
 from .pipelines.run_analysis import run as run_analysis
 from .pipelines.run_backtest import run as run_backtest
+from .pipelines.export_database_snapshots import run as run_export_db_snapshots
 
 
 def main() -> None:
@@ -19,6 +20,7 @@ def main() -> None:
     subparsers.add_parser("collect")
     subparsers.add_parser("resolve")
     subparsers.add_parser("refresh")
+    subparsers.add_parser("backup-db")
     track_parser = subparsers.add_parser("track-day")
     track_parser.add_argument("--poll-seconds", type=int, default=300)
 
@@ -42,6 +44,9 @@ def main() -> None:
         run_collect()
         run_resolve()
         export_excel(settings.root_dir / "backtest.xlsx")
+        run_export_db_snapshots()
+    elif args.command == "backup-db":
+        run_export_db_snapshots()
     elif args.command == "track-day":
         run_daily_tracker(output_path=settings.root_dir / "backtest.xlsx", poll_seconds=args.poll_seconds)
     elif args.command == "analyze":
