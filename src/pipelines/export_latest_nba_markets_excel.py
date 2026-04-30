@@ -182,16 +182,20 @@ def _clean_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _build_schedule_map() -> dict[tuple[str, str], UpcomingGame]:
+def _build_schedule_map(date_candidates: list[str] | None = None) -> dict[tuple[str, str], UpcomingGame]:
     """Build schedule map from ESPN scoreboard API."""
     scoreboard_url = load_settings().apis.espn_scoreboard_base_url
     session = requests.Session()
     session.headers.update({"User-Agent": "nba-market-study/0.1"})
     now = utc_now()
     games: dict[tuple[str, str], UpcomingGame] = {}
-    
-    for delta in range(-1, 8):
-        date_str = (now + timedelta(days=delta)).strftime("%Y%m%d")
+
+    if date_candidates:
+        target_dates = sorted({date.replace('-', '')[:8] for date in date_candidates if date})
+    else:
+        target_dates = [(now + timedelta(days=delta)).strftime("%Y%m%d") for delta in range(-1, 8)]
+
+    for date_str in target_dates:
         try:
             response = session.get(scoreboard_url, params={"dates": date_str}, timeout=20)
             response.raise_for_status()
@@ -264,7 +268,7 @@ def _build_schedule_map() -> dict[tuple[str, str], UpcomingGame]:
                 completed=completed,
             )
             
-    logger.info("Built schedule map with %s games from ESPN", len(games))
+    logger.info("Built schedule map with %s games from ESPN across %s dates", len(games), len(target_dates))
     return games
 
 
@@ -472,6 +476,17 @@ def _load_existing_rows(workbook_path: Path) -> pd.DataFrame:
         return pd.read_excel(workbook_path, sheet_name="backtest")
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
+
+
+def _extract_candidate_dates(existing: pd.DataFrame) -> list[str]:
+    if existing.empty or "比赛时间" not in existing.columns:
+        return []
+    dates: list[str] = []
+    for value in existing["比赛时间"].tolist():
+        text = _clean_text(value)
+        if len(text) >= 10:
+            dates.append(text[:10])
+    return sorted(set(dates))
 
 
 def _normalize_existing_rows(existing: pd.DataFrame, schedule_map: dict[tuple[str, str], UpcomingGame]) -> pd.DataFrame:
@@ -1350,8 +1365,10 @@ def _write_html_report(df: pd.DataFrame, output_path: Path) -> Path:
 def export_excel(output_path: Path) -> Path:
     settings = load_settings()
     setup_logging(settings.logging.level, settings.paths.logs_dir)
-    schedule_map = _build_schedule_map()
-    existing = _normalize_existing_rows(_load_existing_rows(output_path), schedule_map)
+    raw_existing = _load_existing_rows(output_path)
+    candidate_dates = _extract_candidate_dates(raw_existing)
+    schedule_map = _build_schedule_map(candidate_dates)
+    existing = _normalize_existing_rows(raw_existing, schedule_map)
     polymarket_rows = fetch_polymarket_rows(schedule_map)
     kalshi_rows = fetch_kalshi_rows(schedule_map)
     sportsbook_map = fetch_sportsbook_consensus(schedule_map)
