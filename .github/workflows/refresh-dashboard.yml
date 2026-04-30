@@ -35,6 +35,8 @@ jobs:
       - name: Refresh workbook and HTML
         env:
           API_BASKETBALL_KEY: ${{ secrets.API_BASKETBALL_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python -m src.main refresh
 
       - name: Prepare dashboard artifact
