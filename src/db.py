@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -133,11 +134,8 @@ class Database:
         self.database_url = database_url
         self.auth_token = auth_token
         self.use_remote = bool(database_url)
-        self._remote = None
         if self.use_remote and create_client is None:
             raise RuntimeError("libsql-client is required when DATABASE_URL is set")
-        if self.use_remote:
-            self._remote = create_client(url=database_url, auth_token=auth_token)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -151,10 +149,24 @@ class Database:
         finally:
             conn.close()
 
+    def _remote_url(self) -> str:
+        if not self.database_url:
+            raise RuntimeError("DATABASE_URL is not configured")
+        parsed = urlparse(self.database_url)
+        if parsed.scheme == 'libsql':
+            return f"https://{parsed.netloc}{parsed.path or ''}"
+        return self.database_url
+
+    async def _remote_run(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
+        client = create_client(self._remote_url(), auth_token=self.auth_token)
+        try:
+            result = await client.execute(sql, args or [])
+            return result
+        finally:
+            await client.close()
+
     def _remote_execute(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
-        if not self._remote:
-            raise RuntimeError("Remote database client is not initialized")
-        return asyncio.run(self._remote.execute(sql, args or []))
+        return asyncio.run(self._remote_run(sql, args))
 
     def _remote_executemany_script(self, script: str) -> None:
         statements = [stmt.strip() for stmt in script.split(';') if stmt.strip()]
@@ -225,7 +237,7 @@ class Database:
         query += " ORDER BY tipoff_time_utc"
         if self.use_remote:
             result = self._remote_execute(query, params)
-            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            cols = [col[0] if isinstance(col, tuple) else getattr(col, 'name', col) for col in result.columns]
             return [dict(zip(cols, row)) for row in result.rows]
         with self.connect() as conn:
             return list(conn.execute(query, params).fetchall())
@@ -397,7 +409,7 @@ class Database:
         """
         if self.use_remote:
             result = self._remote_execute(query, (platform, snapshot_label))
-            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            cols = [col[0] if isinstance(col, tuple) else getattr(col, 'name', col) for col in result.columns]
             return pd.DataFrame([dict(zip(cols, row)) for row in result.rows])
         with self.connect() as conn:
             return pd.read_sql_query(query, conn, params=[platform, snapshot_label])
@@ -410,7 +422,7 @@ class Database:
         """
         if self.use_remote:
             result = self._remote_execute(query, (game_id,))
-            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            cols = [col[0] if isinstance(col, tuple) else getattr(col, 'name', col) for col in result.columns]
             return [dict(zip(cols, row)) for row in result.rows]
         with self.connect() as conn:
             return list(conn.execute(query, (game_id,)).fetchall())
@@ -432,7 +444,7 @@ class Database:
             result = self._remote_execute(query, params)
             if not result.rows:
                 return None
-            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            cols = [col[0] if isinstance(col, tuple) else getattr(col, 'name', col) for col in result.columns]
             return dict(zip(cols, result.rows[0]))
         with self.connect() as conn:
             return conn.execute(query, params).fetchone()
