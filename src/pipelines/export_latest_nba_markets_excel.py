@@ -489,6 +489,32 @@ def _extract_candidate_dates(existing: pd.DataFrame) -> list[str]:
     return sorted(set(dates))
 
 
+def _backfill_schedule_map_from_existing(existing: pd.DataFrame, schedule_map: dict[tuple[str, str], UpcomingGame]) -> dict[tuple[str, str], UpcomingGame]:
+    if existing.empty:
+        return schedule_map
+    enriched = dict(schedule_map)
+    for _, row in existing.iterrows():
+        home_team = _clean_text(row.get("主队"))
+        away_team = _clean_text(row.get("客队"))
+        game_time = _clean_text(row.get("比赛时间"))
+        if not home_team or not away_team:
+            continue
+        direct = _find_schedule_game(home_team, away_team, enriched)
+        if direct is not None:
+            continue
+        # 为历史比赛保留一条最小占位记录，这样后续可以继续用已有 winner / 时间字段做 settle
+        enriched[(home_team, away_team)] = UpcomingGame(
+            game_time_utc=game_time,
+            home_team=home_team,
+            away_team=away_team,
+            home_abbr="",
+            away_abbr="",
+            winner_team=_clean_text(row.get("实际嬴方（后续补充）")) or None,
+            completed=bool(_clean_text(row.get("实际嬴方（后续补充）"))),
+        )
+    return enriched
+
+
 def _normalize_existing_rows(existing: pd.DataFrame, schedule_map: dict[tuple[str, str], UpcomingGame]) -> pd.DataFrame:
     if existing.empty:
         return existing
@@ -747,12 +773,16 @@ def _apply_results_and_pnl(
         if platform in ["Polymarket", "Kalshi"] and game_time:
             db_winner, db_resolved_at = _load_db_result(platform, home_team, away_team, game_time)
 
+        existing_actual = _clean_text(row.get("实际嬴方（后续补充）"))
         if db_winner:
             work.at[idx, "状态"] = "final"
             work.at[idx, "实际嬴方（后续补充）"] = db_winner
         elif game and game.completed and game.winner_team:
             work.at[idx, "状态"] = "final"
             work.at[idx, "实际嬴方（后续补充）"] = game.winner_team
+        elif existing_actual:
+            work.at[idx, "状态"] = "final"
+            work.at[idx, "实际嬴方（后续补充）"] = existing_actual
         elif game_dt is not None and game_dt <= utc_now():
             work.at[idx, "状态"] = "in_play"
         else:
@@ -1368,6 +1398,7 @@ def export_excel(output_path: Path) -> Path:
     raw_existing = _load_existing_rows(output_path)
     candidate_dates = _extract_candidate_dates(raw_existing)
     schedule_map = _build_schedule_map(candidate_dates)
+    schedule_map = _backfill_schedule_map_from_existing(raw_existing, schedule_map)
     existing = _normalize_existing_rows(raw_existing, schedule_map)
     polymarket_rows = fetch_polymarket_rows(schedule_map)
     kalshi_rows = fetch_kalshi_rows(schedule_map)
