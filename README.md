@@ -65,12 +65,27 @@ Supported values include:
 - `KALSHI_API_BASE_URL`
 - `ESPN_SCOREBOARD_BASE_URL`
 - `DATABASE_PATH`
+- `DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
 - `LOG_LEVEL`
 - `TIMEZONE`
 
+## Database
+
+By default the database lives at `db/nba_market_study.sqlite`.
+
+You can also use a lightweight cloud database via **libSQL/Turso** by setting:
+
+```env
+DATABASE_URL=libsql://your-db-name.turso.io
+TURSO_AUTH_TOKEN=your_token_here
+```
+
+When `DATABASE_URL` is present, the project will use the remote database instead of local SQLite.
+
 ## SQLite Database
 
-The database lives at `db/nba_market_study.sqlite` by default.
+The local database lives at `db/nba_market_study.sqlite` by default.
 
 Tables:
 

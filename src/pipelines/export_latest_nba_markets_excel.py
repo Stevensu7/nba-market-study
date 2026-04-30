@@ -686,7 +686,7 @@ def _load_db_result(platform: str, home_team: str, away_team: str, game_time_utc
     from ..db import Database
 
     settings = load_settings()
-    db = Database(settings.paths.database)
+    db = Database(settings.paths.database, settings.paths.database_url, settings.paths.database_auth_token)
     if not game_time_utc:
         return None, None
     row = db.get_game_result(platform.lower(), home_team, away_team, game_time_utc[:10])

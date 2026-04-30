@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 def run(platform: str, snapshot_label: str, price_field: str) -> dict[str, float | str]:
     settings = load_settings()
     setup_logging(settings.logging.level, settings.paths.logs_dir)
-    db = Database(settings.paths.database)
+    db = Database(settings.paths.database, settings.paths.database_url, settings.paths.database_auth_token)
     db.initialize()
 
     frame = db.load_analysis_frame(platform=platform, snapshot_label=snapshot_label)

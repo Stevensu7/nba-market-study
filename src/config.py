@@ -65,6 +65,8 @@ class BacktestSettings:
 @dataclass(slots=True)
 class PathSettings:
     database: Path
+    database_url: str | None
+    database_auth_token: str | None
     raw_data_dir: Path
     processed_data_dir: Path
     reports_dir: Path
@@ -109,6 +111,8 @@ def _merge_env(cfg: dict[str, Any]) -> dict[str, Any]:
         "ESPN_SCOREBOARD_BASE_URL", cfg["apis"]["espn_scoreboard_base_url"]
     )
     cfg["paths"]["database"] = os.getenv("DATABASE_PATH", cfg["paths"]["database"])
+    cfg["paths"]["database_url"] = os.getenv("DATABASE_URL", cfg["paths"].get("database_url"))
+    cfg["paths"]["database_auth_token"] = os.getenv("TURSO_AUTH_TOKEN", cfg["paths"].get("database_auth_token"))
     cfg["logging"]["level"] = os.getenv("LOG_LEVEL", cfg["logging"]["level"])
     cfg["project"]["timezone"] = os.getenv("TIMEZONE", cfg["project"]["timezone"])
     return cfg
@@ -123,6 +127,8 @@ def load_settings() -> AppSettings:
 
     paths = PathSettings(
         database=root_dir / cfg["paths"]["database"],
+        database_url=cfg["paths"].get("database_url"),
+        database_auth_token=cfg["paths"].get("database_auth_token"),
         raw_data_dir=ensure_dir(root_dir / cfg["paths"]["raw_data_dir"]),
         processed_data_dir=ensure_dir(root_dir / cfg["paths"]["processed_data_dir"]),
         reports_dir=ensure_dir(root_dir / cfg["paths"]["reports_dir"]),

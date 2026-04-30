@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def run(platform: str, snapshot_label: str, strategy_name: str, price_field: str) -> dict[str, object]:
     settings = load_settings()
     setup_logging(settings.logging.level, settings.paths.logs_dir)
-    db = Database(settings.paths.database)
+    db = Database(settings.paths.database, settings.paths.database_url, settings.paths.database_auth_token)
     db.initialize()
     engine = BacktestEngine(db, settings.paths.reports_dir, settings.paths.processed_data_dir)
 

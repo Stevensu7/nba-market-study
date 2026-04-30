@@ -4,6 +4,8 @@ project:
 
 paths:
   database: db/nba_market_study.sqlite
+  database_url:
+  database_auth_token:
   raw_data_dir: data/raw
   processed_data_dir: data/processed
   reports_dir: data/reports

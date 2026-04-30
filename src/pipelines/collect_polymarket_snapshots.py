@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def run() -> None:
     settings = load_settings()
     setup_logging(settings.logging.level, settings.paths.logs_dir)
-    db = Database(settings.paths.database)
+    db = Database(settings.paths.database, settings.paths.database_url, settings.paths.database_auth_token)
     db.initialize()
     collector = PolymarketNBACollector(settings, db)
     discovered = collector.discover_games()

@@ -7,3 +7,4 @@ python-dotenv>=1.0.1
 tenacity>=8.2.3
 pytest>=8.1.0
 openpyxl>=3.1.5
+libsql-client>=0.3.1

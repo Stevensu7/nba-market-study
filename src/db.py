@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,6 +10,11 @@ import pandas as pd
 
 from .models import BacktestBetRecord, GameRecord, PriceSnapshotRecord, ResultRecord
 from .utils import utc_now
+
+try:
+    from libsql_client import create_client
+except Exception:  # noqa: BLE001
+    create_client = None
 
 
 SCHEMA_SQL = """
@@ -122,11 +128,21 @@ CREATE INDEX IF NOT EXISTS idx_backtest_bets_game_id ON backtest_bets(game_id);
 
 
 class Database:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, database_url: str | None = None, auth_token: str | None = None):
         self.db_path = db_path
+        self.database_url = database_url
+        self.auth_token = auth_token
+        self.use_remote = bool(database_url)
+        self._remote = None
+        if self.use_remote and create_client is None:
+            raise RuntimeError("libsql-client is required when DATABASE_URL is set")
+        if self.use_remote:
+            self._remote = create_client(url=database_url, auth_token=auth_token)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        if self.use_remote:
+            raise RuntimeError("SQLite connection is unavailable when using remote database")
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -135,242 +151,271 @@ class Database:
         finally:
             conn.close()
 
+    def _remote_execute(self, sql: str, args: list[Any] | tuple[Any, ...] | None = None):
+        if not self._remote:
+            raise RuntimeError("Remote database client is not initialized")
+        return asyncio.run(self._remote.execute(sql, args or []))
+
+    def _remote_executemany_script(self, script: str) -> None:
+        statements = [stmt.strip() for stmt in script.split(';') if stmt.strip()]
+        for stmt in statements:
+            self._remote_execute(stmt)
+
     def initialize(self) -> None:
+        if self.use_remote:
+            self._remote_executemany_script(SCHEMA_SQL)
+            return
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
 
     def upsert_game(self, record: GameRecord) -> int:
         now = utc_now().isoformat()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO games (
-                    platform, external_game_id, market_id, event_id, game_date_utc,
-                    tipoff_time_utc, home_team, away_team, home_token_id, away_token_id,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(platform, external_game_id) DO UPDATE SET
-                    market_id=excluded.market_id,
-                    event_id=excluded.event_id,
-                    game_date_utc=excluded.game_date_utc,
-                    tipoff_time_utc=excluded.tipoff_time_utc,
-                    home_team=excluded.home_team,
-                    away_team=excluded.away_team,
-                    home_token_id=excluded.home_token_id,
-                    away_token_id=excluded.away_token_id,
-                    status=excluded.status,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    record.platform,
-                    record.external_game_id,
-                    record.market_id,
-                    record.event_id,
-                    record.game_date_utc,
-                    record.tipoff_time_utc,
-                    record.home_team,
-                    record.away_team,
-                    record.home_token_id,
-                    record.away_token_id,
-                    record.status,
-                    now,
-                    now,
-                ),
+        sql = """
+            INSERT INTO games (
+                platform, external_game_id, market_id, event_id, game_date_utc,
+                tipoff_time_utc, home_team, away_team, home_token_id, away_token_id,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, external_game_id) DO UPDATE SET
+                market_id=excluded.market_id,
+                event_id=excluded.event_id,
+                game_date_utc=excluded.game_date_utc,
+                tipoff_time_utc=excluded.tipoff_time_utc,
+                home_team=excluded.home_team,
+                away_team=excluded.away_team,
+                home_token_id=excluded.home_token_id,
+                away_token_id=excluded.away_token_id,
+                status=excluded.status,
+                updated_at=excluded.updated_at
+        """
+        params = (
+            record.platform,
+            record.external_game_id,
+            record.market_id,
+            record.event_id,
+            record.game_date_utc,
+            record.tipoff_time_utc,
+            record.home_team,
+            record.away_team,
+            record.home_token_id,
+            record.away_token_id,
+            record.status,
+            now,
+            now,
+        )
+        if self.use_remote:
+            self._remote_execute(sql, params)
+            row = self._remote_execute(
+                "SELECT id FROM games WHERE platform = ? AND external_game_id = ?",
+                (record.platform, record.external_game_id),
             )
+            return int(row.rows[0][0])
+        with self.connect() as conn:
+            conn.execute(sql, params)
             row = conn.execute(
                 "SELECT id FROM games WHERE platform = ? AND external_game_id = ?",
                 (record.platform, record.external_game_id),
             ).fetchone()
             return int(row["id"])
 
-    def list_games(self, where_sql: str = "", params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
+    def list_games(self, where_sql: str = "", params: tuple[Any, ...] = ()) -> list[Any]:
         query = "SELECT * FROM games"
         if where_sql:
             query += f" WHERE {where_sql}"
         query += " ORDER BY tipoff_time_utc"
+        if self.use_remote:
+            result = self._remote_execute(query, params)
+            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            return [dict(zip(cols, row)) for row in result.rows]
         with self.connect() as conn:
             return list(conn.execute(query, params).fetchall())
 
     def insert_snapshot(self, record: PriceSnapshotRecord) -> bool:
+        sql = """
+            INSERT OR IGNORE INTO price_snapshots (
+                game_id, platform, snapshot_time_utc, minutes_to_tipoff, snapshot_label,
+                home_best_bid, home_best_ask, home_mid_price, home_last_trade_price,
+                away_best_bid, away_best_ask, away_mid_price, away_last_trade_price,
+                home_spread, away_spread, market_volume, market_liquidity,
+                raw_payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            record.game_id,
+            record.platform,
+            record.snapshot_time_utc,
+            record.minutes_to_tipoff,
+            record.snapshot_label,
+            record.home_best_bid,
+            record.home_best_ask,
+            record.home_mid_price,
+            record.home_last_trade_price,
+            record.away_best_bid,
+            record.away_best_ask,
+            record.away_mid_price,
+            record.away_last_trade_price,
+            record.home_spread,
+            record.away_spread,
+            record.market_volume,
+            record.market_liquidity,
+            record.raw_payload_json,
+            utc_now().isoformat(),
+        )
+        if self.use_remote:
+            before = self._remote_execute("SELECT COUNT(*) FROM price_snapshots WHERE game_id = ? AND snapshot_label = ?", (record.game_id, record.snapshot_label)).rows[0][0]
+            self._remote_execute(sql, params)
+            after = self._remote_execute("SELECT COUNT(*) FROM price_snapshots WHERE game_id = ? AND snapshot_label = ?", (record.game_id, record.snapshot_label)).rows[0][0]
+            return after > before
         with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO price_snapshots (
-                    game_id, platform, snapshot_time_utc, minutes_to_tipoff, snapshot_label,
-                    home_best_bid, home_best_ask, home_mid_price, home_last_trade_price,
-                    away_best_bid, away_best_ask, away_mid_price, away_last_trade_price,
-                    home_spread, away_spread, market_volume, market_liquidity,
-                    raw_payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.game_id,
-                    record.platform,
-                    record.snapshot_time_utc,
-                    record.minutes_to_tipoff,
-                    record.snapshot_label,
-                    record.home_best_bid,
-                    record.home_best_ask,
-                    record.home_mid_price,
-                    record.home_last_trade_price,
-                    record.away_best_bid,
-                    record.away_best_ask,
-                    record.away_mid_price,
-                    record.away_last_trade_price,
-                    record.home_spread,
-                    record.away_spread,
-                    record.market_volume,
-                    record.market_liquidity,
-                    record.raw_payload_json,
-                    utc_now().isoformat(),
-                ),
-            )
+            cursor = conn.execute(sql, params)
             return cursor.rowcount > 0
 
     def upsert_result(self, record: ResultRecord) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO results (
-                    game_id, winner_team, loser_team, home_win, away_win, final_score_json,
-                    source, resolved_at_utc, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(game_id) DO UPDATE SET
-                    winner_team=excluded.winner_team,
-                    loser_team=excluded.loser_team,
-                    home_win=excluded.home_win,
-                    away_win=excluded.away_win,
-                    final_score_json=excluded.final_score_json,
-                    source=excluded.source,
-                    resolved_at_utc=excluded.resolved_at_utc
-                """,
-                (
-                    record.game_id,
-                    record.winner_team,
-                    record.loser_team,
-                    record.home_win,
-                    record.away_win,
-                    record.final_score_json,
-                    record.source,
-                    record.resolved_at_utc,
-                    utc_now().isoformat(),
-                ),
-            )
-
-    def insert_backtest_run(self, payload: dict[str, Any]) -> int:
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO backtest_runs (
-                    strategy_name, start_bankroll, end_bankroll, total_bets, wins, losses,
-                    pushes, win_rate, roi, max_drawdown, config_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    payload["strategy_name"],
-                    payload["start_bankroll"],
-                    payload["end_bankroll"],
-                    payload["total_bets"],
-                    payload["wins"],
-                    payload["losses"],
-                    payload["pushes"],
-                    payload["win_rate"],
-                    payload["roi"],
-                    payload["max_drawdown"],
-                    payload["config_json"],
-                    utc_now().isoformat(),
-                ),
-            )
-            lastrowid = cursor.lastrowid
-            if lastrowid is None:
-                raise RuntimeError("Failed to insert backtest run row.")
-            return int(lastrowid)
-
-    def insert_backtest_bets(self, bets: list[BacktestBetRecord]) -> None:
-        if not bets:
+        sql = """
+            INSERT INTO results (
+                game_id, winner_team, loser_team, home_win, away_win, final_score_json,
+                source, resolved_at_utc, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id) DO UPDATE SET
+                winner_team=excluded.winner_team,
+                loser_team=excluded.loser_team,
+                home_win=excluded.home_win,
+                away_win=excluded.away_win,
+                final_score_json=excluded.final_score_json,
+                source=excluded.source,
+                resolved_at_utc=excluded.resolved_at_utc
+        """
+        params = (
+            record.game_id,
+            record.winner_team,
+            record.loser_team,
+            record.home_win,
+            record.away_win,
+            record.final_score_json,
+            record.source,
+            record.resolved_at_utc,
+            utc_now().isoformat(),
+        )
+        if self.use_remote:
+            self._remote_execute(sql, params)
             return
         with self.connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO backtest_bets (
-                    run_id, game_id, strategy_name, bet_time_basis, side_team, side_type,
-                    implied_prob_q, estimated_prob_p_hat, edge, stake, price, odds_style,
-                    result, pnl, bankroll_before, bankroll_after, reason_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        bet.run_id,
-                        bet.game_id,
-                        bet.strategy_name,
-                        bet.bet_time_basis,
-                        bet.side_team,
-                        bet.side_type,
-                        bet.implied_prob_q,
-                        bet.estimated_prob_p_hat,
-                        bet.edge,
-                        bet.stake,
-                        bet.price,
-                        bet.odds_style,
-                        bet.result,
-                        bet.pnl,
-                        bet.bankroll_before,
-                        bet.bankroll_after,
-                        bet.reason_json,
-                        utc_now().isoformat(),
-                    )
-                    for bet in bets
-                ],
-            )
+            conn.execute(sql, params)
 
-    def load_analysis_frame(self, platform: str, snapshot_label: str) -> pd.DataFrame:
+    def insert_backtest_run(self, payload: dict[str, Any]) -> int:
+        sql = """
+            INSERT INTO backtest_runs (
+                strategy_name, start_bankroll, end_bankroll, total_bets, wins, losses,
+                pushes, win_rate, roi, max_drawdown, config_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            payload["strategy_name"],
+            payload["start_bankroll"],
+            payload["end_bankroll"],
+            payload["total_bets"],
+            payload["wins"],
+            payload["losses"],
+            payload["pushes"],
+            payload["win_rate"],
+            payload["roi"],
+            payload["max_drawdown"],
+            payload["config_json"],
+            utc_now().isoformat(),
+        )
+        if self.use_remote:
+            self._remote_execute(sql, params)
+            row = self._remote_execute("SELECT last_insert_rowid()")
+            return int(row.rows[0][0])
+        with self.connect() as conn:
+            cursor = conn.execute(sql, params)
+            return int(cursor.lastrowid)
+
+    def insert_backtest_bets(self, bets: list[BacktestBetRecord]) -> None:
+        sql = """
+            INSERT INTO backtest_bets (
+                run_id, game_id, strategy_name, bet_time_basis, side_team, side_type,
+                implied_prob_q, estimated_prob_p_hat, edge, stake, price, odds_style,
+                result, pnl, bankroll_before, bankroll_after, reason_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        rows = [(
+            bet.run_id,
+            bet.game_id,
+            bet.strategy_name,
+            bet.bet_time_basis,
+            bet.side_team,
+            bet.side_type,
+            bet.implied_prob_q,
+            bet.estimated_prob_p_hat,
+            bet.edge,
+            bet.stake,
+            bet.price,
+            bet.odds_style,
+            bet.result,
+            bet.pnl,
+            bet.bankroll_before,
+            bet.bankroll_after,
+            bet.reason_json,
+            utc_now().isoformat(),
+        ) for bet in bets]
+        if self.use_remote:
+            for row in rows:
+                self._remote_execute(sql, row)
+            return
+        with self.connect() as conn:
+            conn.executemany(sql, rows)
+
+    def load_snapshots_frame(self, platform: str, snapshot_label: str) -> pd.DataFrame:
         query = """
         SELECT
             g.id AS game_id,
             g.platform,
-            g.tipoff_time_utc,
-            g.game_date_utc,
             g.home_team,
             g.away_team,
-            ps.snapshot_time_utc,
-            ps.minutes_to_tipoff,
-            ps.snapshot_label,
-            ps.home_best_bid,
-            ps.home_best_ask,
-            ps.home_mid_price,
-            ps.home_last_trade_price,
-            ps.away_best_bid,
-            ps.away_best_ask,
-            ps.away_mid_price,
-            ps.away_last_trade_price,
-            ps.home_spread,
-            ps.away_spread,
-            ps.market_volume,
-            ps.market_liquidity,
+            g.tipoff_time_utc,
+            s.snapshot_time_utc,
+            s.snapshot_label,
+            s.home_best_bid,
+            s.home_best_ask,
+            s.home_mid_price,
+            s.home_last_trade_price,
+            s.away_best_bid,
+            s.away_best_ask,
+            s.away_mid_price,
+            s.away_last_trade_price,
+            s.market_volume,
+            s.market_liquidity,
             r.winner_team,
-            r.loser_team,
             r.home_win,
             r.away_win
-        FROM games g
-        JOIN price_snapshots ps ON g.id = ps.game_id
-        JOIN results r ON g.id = r.game_id
-        WHERE g.platform = ? AND ps.snapshot_label = ?
+        FROM price_snapshots s
+        JOIN games g ON g.id = s.game_id
+        LEFT JOIN results r ON r.game_id = g.id
+        WHERE g.platform = ? AND s.snapshot_label = ?
         ORDER BY g.tipoff_time_utc
         """
+        if self.use_remote:
+            result = self._remote_execute(query, (platform, snapshot_label))
+            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            return pd.DataFrame([dict(zip(cols, row)) for row in result.rows])
         with self.connect() as conn:
             return pd.read_sql_query(query, conn, params=[platform, snapshot_label])
 
-    def list_snapshots_for_game(self, game_id: int) -> list[sqlite3.Row]:
-        """Get all price snapshots for a specific game."""
+    def list_snapshots_for_game(self, game_id: int) -> list[Any]:
         query = """
         SELECT * FROM price_snapshots 
         WHERE game_id = ? 
         ORDER BY snapshot_time_utc
         """
+        if self.use_remote:
+            result = self._remote_execute(query, (game_id,))
+            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            return [dict(zip(cols, row)) for row in result.rows]
         with self.connect() as conn:
             return list(conn.execute(query, (game_id,)).fetchall())
 
-    def get_game_result(self, platform: str, home_team: str, away_team: str, game_date_prefix: str) -> sqlite3.Row | None:
+    def get_game_result(self, platform: str, home_team: str, away_team: str, game_date_prefix: str) -> Any:
         query = """
         SELECT r.*, g.status AS game_status, g.tipoff_time_utc
         FROM results r
@@ -382,5 +427,12 @@ class Database:
         ORDER BY g.tipoff_time_utc
         LIMIT 1
         """
+        params = (platform, home_team, away_team, f"{game_date_prefix}%")
+        if self.use_remote:
+            result = self._remote_execute(query, params)
+            if not result.rows:
+                return None
+            cols = [c[0] if isinstance(c, tuple) else c for c in result.columns]
+            return dict(zip(cols, result.rows[0]))
         with self.connect() as conn:
-            return conn.execute(query, (platform, home_team, away_team, f"{game_date_prefix}%")).fetchone()
+            return conn.execute(query, params).fetchone()
